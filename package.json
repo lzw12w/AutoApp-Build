@@ -1,7 +1,7 @@
 {
 	"name": "para-ios",
 	"version": "0.1.0",
-	"description": "Para — App-runtime GUI agent for iOS, rebuilt as a pi extension. Drives a running iOS app in natural language and builds a knowledge graph as it explores.",
+	"description": "Para — natural-language GUI agent for live iOS/Android apps, as a pi extension.",
 	"type": "module",
 	"private": true,
 	"main": "./src/index.ts",

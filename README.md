@@ -1,92 +1,79 @@
-# para-ios
+# AutoApp-Build（Para）
 
-Para — App-runtime GUI agent for iOS, rebuilt as a [pi](https://github.com/earendil-works/pi) extension.
+用自然语言驱动**正在运行的 iOS / Android App**：看屏幕、点控件、等动画、记页面关系。Agent 循环和模型层来自 [pi](https://github.com/earendil-works/pi)；本仓库是 pi 的 extension，负责 Inspector 传输、GUI 工具和知识图谱。
 
-Para drives a running iOS app in natural language and builds a knowledge graph as
-it explores. The agent loop, multi-provider LLM layer, compaction, and tool
-execution come from pi (`@earendil-works/pi-*`); this package owns the iOS
-domain: device transport, tools, and the knowledge graph.
+目标 App 需以 Debug 打开 Inspector HTTP（默认本机 `8765`）。不替代 XCUITest / Espresso，也不在 GUI 模式里改你的源码。
 
-## Status
+## 两种模式（互斥）
 
-Phases 0–5 of the rewrite plan:
-
-| Phase | What | State |
+| 模式 | 做什么 | 怎么切 |
 |---|---|---|
-| 0 | Scaffold + `ping` proving `registerTool` | done |
-| 1 | Device layer (`transport` / `client` / `models` / `iproxy` tunnel) | done |
-| 2 | Inspect + interact tools | done (assertions / vision / skills / shell deferred) |
-| 3 | Knowledge graph + observer + navigate/recall tools | done |
-| 4 | System prompt + `~/.ios-inspector/config.toml` / env mapping | done |
-| 5 | `para` CLI (`chat` / `exec` / `doctor` / `tools`) | done |
-| 6 | Web/Host FastAPI+SPA | deferred, as planned |
+| **GUI**（默认） | 驱动真机：`screen_digest` / `tap_with_diff` / `wait_for` / 知识图谱…，外加 `read` | `/gui`、`switch_mode(mode="gui")` |
+| **CODE** | 改这个仓库：`read` / `write` / `edit` / `grep` / `find` / `ls` / `bash` | `/code`、`switch_mode(mode="code")` |
 
-SQLite uses `bun:sqlite` under Bun and `node:sqlite` under Node. That split is
-required: `pi -e` loads extensions with Node/jiti, so a static `bun:sqlite`
-import would crash the real CLI.
+不要混用 tap 和 write。人可以 `/mode` 查看或切换；模型也可以自己 `switch_mode`。启动：`--para-mode code` 或 `PARA_MODE=code`。
 
-## Layout
+## 要求
 
-```
-src/
-  index.ts              extension entry
-  cli.ts                `para` CLI
-  exec.ts               doctor + one-shot exec (JSON)
-  config.ts             toml + env
-  prompts.ts            system prompt
-  transport.ts          HTTP to SAInspector
-  client.ts             typed inspector client
-  models.ts             Frame / ViewNode / VCNode / TapResult
-  tools/                registerTool wrappers
-  knowledge/            fingerprint, graph, store, observer
-  ios-runtime/tunnel.ts USB port-forward (iproxy)
-test/
-```
-
-## Develop
+- [Bun](https://bun.sh)
+- 真机 USB：iOS 需要 `iproxy`（libimobiledevice）；Android 需要 `adb`
+- LLM：`ANTHROPIC_API_KEY`（或兼容 `ANTHROPIC_BASE_URL`）/ `OPENAI_API_KEY`
 
 ```bash
 bun install
-bun run check      # tsc --noEmit
-bun test           # unit + extension smoke tests
+bun src/cli.ts doctor          # Inspector + 密钥
+bun src/cli.ts                 # 交互（GUI）
+bun src/cli.ts exec -m "当前是什么页面，不要点"
 ```
 
-## Run
+两台同时插着时，默认 `8765` 给 iOS，避免抢端口。打 Android：
 
 ```bash
-# Interactive (pi TUI + this extension)
-bun src/cli.ts
-# or
-bunx pi -e ./src/index.ts
-
-# One-shot JSON (host/CI contract)
-bun src/cli.ts exec -m "what page is shown?"
-
-# Connectivity
-bun src/cli.ts doctor
-bun src/cli.ts doctor --json
-
-# Tool list
-bun src/cli.ts tools
+bun src/cli.ts doctor --platform android --device <adb-serial> --port 18765
 ```
 
-The target iOS app must be running in Debug with `SAInspectorHTTPServer` on
-port 8765. Real devices: `iproxy 8765 8765` (or let Para start it).
+只插 Android、或不传 `--platform` 但 `--device` 能对上 `adb devices` 时，tunnel 会自己 `adb forward`。端上 inspector 端口默认仍是 `8765`。
 
-## Config
+## CLI
 
-File `~/.ios-inspector/config.toml` (same path as the Python agent), then env.
-Env wins. Useful keys:
+```
+para [chat] [pi-args...]     交互
+para exec -m "<prompt>"      一轮，JSON stdout
+para doctor [--json]         连通性
+para tools                   已注册工具名
+```
 
-| Key | Env |
+常用参数：`--host` `--port` `--device` / `-d` `--platform` `--remote-port`。
+
+等价：`bunx pi -e ./src/index.ts`。
+
+## 配置
+
+先读 `~/.ios-inspector/config.toml`，再被环境变量覆盖。密钥不要进仓库。
+
+| 项 | 环境变量 |
 |---|---|
-| `inspector_host` / `inspector_port` | `PARA_INSPECTOR_HOST`, `PARA_INSPECTOR_PORT` (or `INSPECTOR_*`) |
+| `inspector_host` / `inspector_port` | `PARA_INSPECTOR_HOST` / `PARA_INSPECTOR_PORT`（或 `INSPECTOR_*`） |
 | `inspector_device` | `PARA_DEVICE_UDID` / `INSPECTOR_DEVICE` |
-| `bundle_id` | `PARA_BUNDLE_ID` / `INSPECTOR_BUNDLE_ID` |
-| `anthropic_api_key` / `anthropic_base_url` | `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` |
-| `openai_api_key` / `openai_base_url` | `OPENAI_API_KEY` / `OPENAI_BASE_URL` |
-| `llm_model` | `PARA_LLM_MODEL` / `INSPECTOR_LLM_MODEL` |
-| `disable_knowledge` | `PARA_DISABLE_KNOWLEDGE` |
+| `inspector_platform` | `PARA_INSPECTOR_PLATFORM`（`auto` \| `ios` \| `android`） |
+| `inspector_remote_port` | `PARA_INSPECTOR_REMOTE_PORT` |
+| `bundle_id` | `PARA_BUNDLE_ID` |
+| `para_mode` | `PARA_MODE`（`gui` \| `code`） |
+| Anthropic / OpenAI | `ANTHROPIC_API_KEY`、`ANTHROPIC_BASE_URL`、`OPENAI_API_KEY` |
 
-A custom Anthropic-compatible `base_url` is applied via `pi.registerProvider("anthropic", { baseUrl })`.
-Project lore is snapshotted from `PARA_NOTE_PATH` or `~/.ios-inspector/NOTE.md` at session start.
+`NOTE.md`（默认 `~/.ios-inspector/NOTE.md`）在会话开始时打进 prompt；本轮 `record_knowledge` 写入磁盘，但要下一轮启动才出现在 `<project_knowledge>`。
+
+## 开发
+
+```bash
+bun run check    # tsc --noEmit
+bun test
+```
+
+SQLite：Bun 用 `bun:sqlite`，`pi -e` 走 Node/jiti 时用 `node:sqlite`。不要改成静态只 import `bun:sqlite`。
+
+## 现状
+
+已做：Inspector 客户端、GUI 工具、知识图谱、GUI/CODE 切换、iOS `iproxy` + Android `adb forward`、`para` CLI。
+
+刻意没做：视觉模型、`find_and_tap`、默认 bash（GUI 模式）、Web 控制台、多机自动分端口。Android 端若没有 `/api/vc_hierarchy`，`screen_digest` 仍可用。

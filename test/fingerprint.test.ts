@@ -84,11 +84,15 @@ describe("isRoleAid", () => {
 	test("developer role aids accepted", () => {
 		expect(isRoleAid("btn_like")).toBe(true);
 		expect(isRoleAid("feed_cell")).toBe(true);
+		expect(isRoleAid("mainTab.item.feed")).toBe(true);
+		expect(isRoleAid("playInfoBar.likeButton")).toBe(true);
+		expect(isRoleAid("messageInput.field")).toBe(true);
 	});
 	test("content-bearing aids rejected", () => {
 		expect(isRoleAid("aweme_cell_7234567891234")).toBe(false);
 		expect(isRoleAid("cell_a3f2e91d")).toBe(false);
 		expect(isRoleAid("MixedCase")).toBe(false);
+		expect(isRoleAid("feed.card.12345")).toBe(false);
 		expect(isRoleAid("")).toBe(false);
 	});
 });

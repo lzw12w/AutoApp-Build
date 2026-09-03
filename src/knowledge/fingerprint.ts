@@ -150,12 +150,20 @@ export function isVolatileAid(aid: string): boolean {
 
 // ---- content-blind role-aid identification ----------------------------
 
-const ROLE_AID_PATTERN = /^[a-z][a-z0-9_\-]{0,47}$/;
-const ROLE_AID_REJECT_PATTERNS: RegExp[] = [/\d{4,}/, /[0-9a-f]{8}/, /(^|[_-])uuid([_-]|$)/];
+/**
+ * Developer-assigned role ids, including Odyssey dotted paths
+ * (`mainTab.item.feed`, `playInfoBar.likeButton`). Still reject content
+ * ids (digit runs, uuid/hex). MixedCase *without* a leading lowercase
+ * segment (`MixedCase`) stays out — those are type names, not role keys.
+ */
+const ROLE_AID_PATTERN =
+	/^[a-z][A-Za-z0-9_-]{0,47}(\.[A-Za-z][A-Za-z0-9_-]{0,47}){0,8}$/;
+const ROLE_AID_REJECT_PATTERNS: RegExp[] = [/\d{4,}/, /[0-9a-f]{8}/, /(^|[._-])uuid([._-]|$)/];
 
 export function isRoleAid(aid: string): boolean {
 	if (!aid) return false;
 	const s = aid.trim();
+	if (s.length > 80) return false;
 	if (!ROLE_AID_PATTERN.test(s)) return false;
 	return !ROLE_AID_REJECT_PATTERNS.some((p) => p.test(s));
 }

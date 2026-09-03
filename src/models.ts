@@ -336,6 +336,26 @@ export class VCNode {
 	}
 
 	/**
+	 * Root → presented/selected descendants currently on screen.
+	 * Unselected tab siblings are omitted — they are in `walk()` but not here.
+	 */
+	visiblePath(): VCNode[] {
+		const path: VCNode[] = [];
+		let cur: VCNode = this;
+		for (let i = 0; i < 64; i++) {
+			path.push(cur);
+			if (cur.presented !== null) {
+				cur = cur.presented;
+				continue;
+			}
+			const picked = activeVcChild(cur);
+			if (picked === cur) return path;
+			cur = picked;
+		}
+		return path;
+	}
+
+	/**
 	 * Return the VC that is actually on screen. Descent order at each level:
 	 *   1. `presented` (modal covers everything underneath)
 	 *   2. `selectedChild` (tab/segmented active branch, index/selected fallback)
@@ -343,18 +363,8 @@ export class VCNode {
 	 * Capped so a pathological cycle can't hang the caller.
 	 */
 	visibleLeaf(): VCNode {
-		// biome-ignore lint/complexity/noUselessThisAlias: intentional cursor walk
-		let cur: VCNode = this;
-		for (let i = 0; i < 64; i++) {
-			if (cur.presented !== null) {
-				cur = cur.presented;
-				continue;
-			}
-			const picked = activeVcChild(cur);
-			if (picked === cur) return cur;
-			cur = picked;
-		}
-		return cur;
+		const path = this.visiblePath();
+		return path[path.length - 1]!;
 	}
 }
 
@@ -375,6 +385,20 @@ function activeVcChild(vc: VCNode): VCNode {
 }
 
 export type TapMethod = "public_api" | "gesture_reflection" | "coordinate" | "unknown";
+
+function asAddress(value: unknown): string | null {
+	if (typeof value === "string" && value) return value;
+	if (isRecord(value) && typeof value.address === "string" && value.address) return value.address;
+	return null;
+}
+
+function asHandledBy(raw: Record<string, unknown>): string | null {
+	const direct = raw.handled_by ?? raw.handledBy;
+	if (typeof direct === "string" && direct) return direct;
+	const target = raw.address ?? raw.target;
+	if (isRecord(target) && typeof target.class === "string" && target.class) return target.class;
+	return null;
+}
 
 export class TapResult {
 	readonly targetAddress: string | null;
@@ -401,9 +425,9 @@ export class TapResult {
 			method = "unknown";
 		}
 		return new TapResult({
-			targetAddress: (raw.address ?? raw.target ?? null) as string | null,
+			targetAddress: asAddress(raw.address) ?? asAddress(raw.target),
 			method: method as TapMethod,
-			handledBy: (raw.handled_by ?? raw.handledBy ?? null) as string | null,
+			handledBy: asHandledBy(raw),
 			raw,
 		});
 	}

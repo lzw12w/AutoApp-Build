@@ -120,8 +120,15 @@ function isInteresting(node: ViewNode, anchors: Anchors): boolean {
 	if (anchors.text || anchors.aid || anchors.a11y || anchors.prop || anchors.asset || anchors.sym) {
 		return true;
 	}
-	if (gestureIsActionable(anchors.gest, Boolean(anchors.prop))) return true;
 	const clsL = (node.cls || "").toLowerCase();
+	if (gestureIsActionable(anchors.gest, Boolean(anchors.prop))) {
+		// A full-screen UILayoutContainerView often has a Tap recognizer that
+		// hit-tests to children. Keeping it makes digest line 1 an unusable
+		// tap target. Custom (non Tap/LongPress) recognizers still count.
+		if (!PURE_LAYOUT.has(clsL)) return true;
+		const tokens = (anchors.gest || "").split("+");
+		if (tokens.some((t) => t && t !== "Tap" && t !== "LongPress")) return true;
+	}
 	if (PURE_LAYOUT.has(clsL)) return false;
 	return INTERACTIVE_OR_STRUCTURAL.some((kw) => clsL.includes(kw));
 }
@@ -304,12 +311,18 @@ export function buildScreenDigest(root: ViewNode, vcLabel?: string | null): stri
 		const mergedText = textKids.length ? textKids[0]!.primary : null;
 		if (mergedText && parentEntry.primary) newExtras.push(parentEntry.primary);
 		for (const k of kids) {
-			if (k.primary && k.primary.startsWith('"')) continue;
+			if (k.primary && k.primary.startsWith('"')) {
+				// Text becomes the parent's primary, but role handles (aid=)
+				// must still surface — otherwise tap_with_diff(accessibility_id=)
+				// cannot see the only stable identifier on the line.
+				newExtras.push(...k.extras);
+				folded.add(k);
+				continue;
+			}
 			if (k.primary) newExtras.push(k.primary);
 			newExtras.push(...k.extras);
 			folded.add(k);
 		}
-		if (textKids.length) folded.add(textKids[0]!);
 		parentEntry.primary = mergedText || parentEntry.primary;
 		parentEntry.extras = dedupeExtras(newExtras, parentEntry.primary);
 	}

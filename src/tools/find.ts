@@ -58,31 +58,125 @@ export function ambiguousFindAndTap(
 	return !sel.text && !sel.accessibilityId && !sel.propertyName;
 }
 
-function hasReadableContent(node: ViewNode): boolean {
-	const extra = node.extra ?? {};
-	return Boolean(
-		node.text ||
-			extra.imageSymbolName ||
-			extra.image_symbol_name ||
-			extra.imageAssetName ||
-			extra.image_asset_name ||
-			extra.accessibilityLabel ||
-			extra.accessibility_label,
-	);
+export const FIND_TREE_DEPTH = 25;
+
+function norm(value: unknown): string {
+	return String(value ?? "").trim().toLowerCase();
 }
 
-/** Visible + content-bearing first; original order as the remaining tiebreaker. */
+function matchRank(value: unknown, query: unknown): number {
+	const q = norm(query);
+	if (!q) return 0;
+	const v = norm(value);
+	if (!v) return 4;
+	if (v === q) return 0;
+	if (v.startsWith(q)) return 1;
+	if (v.includes(q)) return 2;
+	return 4;
+}
+
+function boolRank(value: boolean | null): number {
+	if (value === true) return 0;
+	if (value === null) return 1;
+	return 2;
+}
+
+function visibleRatio(node: ViewNode): number {
+	const raw = node.extra.visibleRatio ?? node.extra.visible_ratio;
+	if (raw === undefined || raw === null) return node.onScreen === false ? 0 : 1;
+	const n = Number(raw);
+	if (!Number.isFinite(n)) return node.onScreen === false ? 0 : 1;
+	return Math.max(0, Math.min(1, n));
+}
+
+function interactiveRank(node: ViewNode): number {
+	if (node.extra.userInteractionEnabled === false) return 3;
+	const cls = node.cls.toLowerCase();
+	if (["button", "control", "cell", "switch", "textfield", "textview", "collectionviewcell", "tableviewcell"].some((t) => cls.includes(t))) {
+		return 0;
+	}
+	if (cls.includes("label") || cls.includes("imageview")) return 1;
+	return 2;
+}
+
+function sizeRank(node: ViewNode): number {
+	const area = node.frame.area;
+	if (area <= 0) return 4;
+	if (node.frame.width < 8 || node.frame.height < 8) return 3;
+	if (area > 120_000) return 3;
+	if (node.frame.width < 24 || node.frame.height < 18) return 1;
+	return 0;
+}
+
+function findRankKey(node: ViewNode, sel: FindSelector): number[] {
+	const prop = node.extra.propertyName ?? node.extra.property_name;
+	return [
+		node.isVisible() ? 0 : 1,
+		boolRank(node.onScreen),
+		matchRank(node.accessibilityId, sel.accessibilityId),
+		matchRank(prop, sel.propertyName),
+		matchRank(node.text, sel.text),
+		matchRank(node.cls, sel.cls),
+		node.textSource ? 1 : 0,
+		interactiveRank(node),
+		-visibleRatio(node),
+		node.frame.x >= 0 && node.frame.y >= 0 ? 0 : 1,
+		sizeRank(node),
+		node.frame.y,
+		node.frame.x,
+		-Math.min(node.frame.area, 20_000),
+	];
+}
+
+/** Rank like Python InspectorSession.rank_find_candidates (lower key wins). */
+export function rankFindCandidates(candidates: ViewNode[], sel: FindSelector = {}): ViewNode[] {
+	return [...candidates].sort((a, b) => {
+		const ka = findRankKey(a, sel);
+		const kb = findRankKey(b, sel);
+		for (let i = 0; i < ka.length; i++) {
+			if (ka[i]! !== kb[i]!) return ka[i]! - kb[i]!;
+		}
+		return 0;
+	});
+}
+
+/** Visible-first ranking used when no query is available. */
 export function rankCandidates(candidates: ViewNode[]): ViewNode[] {
-	return candidates
-		.map((node, index) => ({ node, index }))
-		.sort((a, b) => {
-			const av = a.node.isVisible() ? 0 : 1;
-			const bv = b.node.isVisible() ? 0 : 1;
-			if (av !== bv) return av - bv;
-			const ac = hasReadableContent(a.node) ? 0 : 1;
-			const bc = hasReadableContent(b.node) ? 0 : 1;
-			if (ac !== bc) return ac - bc;
-			return a.index - b.index;
-		})
-		.map((x) => x.node);
+	return rankFindCandidates(candidates, {});
+}
+
+export function preferVisible(nodes: ViewNode[]): ViewNode[] {
+	return nodes.filter((n) => !n.hidden && n.frame.width > 0 && n.frame.height > 0);
+}
+
+export function applyVisibleOnly(nodes: ViewNode[], visibleOnly: boolean): ViewNode[] {
+	if (!visibleOnly || nodes.length === 0) return nodes;
+	const serverVisible = nodes.filter((n) => n.onScreen === true);
+	return serverVisible.length > 0 ? serverVisible : nodes;
+}
+
+function isTabBarClass(cls: string): boolean {
+	const c = cls.toLowerCase();
+	return c.includes("tabbar") && !c.includes("item");
+}
+
+function isTabItemClass(cls: string): boolean {
+	const c = cls.toLowerCase();
+	return c.includes("tabbaritem") || c.includes("tab_bar_item");
+}
+
+/** Index of the tab-bar item that owns `target`, or null if not inside a bar. */
+export function tabIndexForTarget(root: ViewNode, target: ViewNode): number | null {
+	const addr = target.address;
+	if (!addr) return null;
+	for (const bar of root.walk()) {
+		if (!isTabBarClass(bar.cls)) continue;
+		const items = bar.children.filter((c) => isTabItemClass(c.cls));
+		if (items.length === 0) continue;
+		const idx = items.findIndex(
+			(item) => item.address === addr || [...item.walk()].some((n) => n.address === addr),
+		);
+		if (idx >= 0) return idx;
+	}
+	return null;
 }

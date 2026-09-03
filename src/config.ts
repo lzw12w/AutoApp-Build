@@ -1,14 +1,43 @@
 /**
  * Para config. File first, then env.
  *
- * File: ~/.ios-inspector/config.toml (same path as the Python agent).
- * Env: INSPECTOR_* / ANTHROPIC_* / OPENAI_* (Python names) and PARA_* aliases.
+ * File: ~/.para/config.toml (Para-V2's own home, independent from the Python
+ * agent's ~/.ios-inspector).
+ * Env: INSPECTOR_* (Python names) and PARA_* aliases.
+ *
+ * LLM credentials are intentionally NOT part of Para config: pi owns them, but
+ * from Para's OWN agent home (~/.para/agent/models.json + auth.json, via
+ * applyAgentDir), never the shared ~/.pi/agent. Para only selects a
+ * provider/model; it never reads ANTHROPIC_* / OPENAI_*.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export const CONFIG_PATH = join(homedir(), ".ios-inspector", "config.toml");
+export const CONFIG_PATH = join(homedir(), ".para", "config.toml");
+
+/** Para's own pi-agent home. Kept separate from ~/.pi/agent so Para's LLM
+ * providers/credentials/sessions never mix with a plain `pi` install. */
+export const PARA_AGENT_DIR = join(homedir(), ".para", "agent");
+
+/**
+ * Redirect pi's config layer (models.json, auth.json, settings.json, sessions)
+ * to Para's own home before any pi code reads it. pi resolves getAgentDir()
+ * from PI_CODING_AGENT_DIR (ENV_AGENT_DIR), so we set that. Location is
+ * overridable via PARA_AGENT_DIR. MUST run before ModelRuntime.create(),
+ * getAgentDir(), or spawning a child `pi` — call it at CLI entry.
+ */
+export function applyAgentDir(env: NodeJS.ProcessEnv = process.env): string {
+	const dir = env.PARA_AGENT_DIR?.trim() || PARA_AGENT_DIR;
+	env.PI_CODING_AGENT_DIR = dir;
+	try {
+		mkdirSync(dir, { recursive: true });
+	} catch {
+		// non-fatal: pi still creates what it needs on write
+	}
+	return dir;
+}
 
 export interface ParaConfig {
 	inspectorHost: string;
@@ -23,13 +52,14 @@ export interface ParaConfig {
 	knowledgeDir?: string;
 	autoTunnel: boolean;
 	disableKnowledge: boolean;
+	/**
+	 * Provider id selecting which pi provider to use (Para's ~/.para/agent/models.json
+	 * or a built-in). Para no longer stores API keys or base URLs itself — those
+	 * live entirely in pi's config so we never hijack the shared ANTHROPIC_* env.
+	 */
 	llmProvider: string;
 	llmModel: string;
-	anthropicApiKey?: string;
-	anthropicBaseUrl?: string;
 	anthropicThinkingBudget?: number;
-	openaiApiKey?: string;
-	openaiBaseUrl?: string;
 	notePath?: string;
 	llmMaxTokens?: number;
 	/** Session start mode: gui (device) or code (repo). */
@@ -64,11 +94,27 @@ function falsy(raw: string | undefined): boolean {
 	return ["0", "false", "no", "off"].includes((raw ?? "").trim().toLowerCase());
 }
 
+/** Strip a `#` comment, but not one inside a single/double-quoted string. */
+function stripInlineComment(line: string): string {
+	let quote: '"' | "'" | null = null;
+	for (let i = 0; i < line.length; i++) {
+		const ch = line[i];
+		if (quote) {
+			if (ch === quote) quote = null;
+		} else if (ch === '"' || ch === "'") {
+			quote = ch;
+		} else if (ch === "#") {
+			return line.slice(0, i);
+		}
+	}
+	return line;
+}
+
 /** Minimal flat TOML: `key = "str"` / `key = 1` / `key = true`. Ignores tables. */
 export function parseFlatToml(text: string): Record<string, string | number | boolean> {
 	const out: Record<string, string | number | boolean> = {};
 	for (const rawLine of text.split(/\r?\n/)) {
-		const line = rawLine.replace(/#.*$/, "").trim();
+		const line = stripInlineComment(rawLine).trim();
 		if (!line || line.startsWith("[")) continue;
 		const eq = line.indexOf("=");
 		if (eq < 1) continue;
@@ -133,11 +179,7 @@ export function loadConfig(options: { tomlPath?: string; env?: NodeJS.ProcessEnv
 			if (typeof data.disable_knowledge === "boolean") cfg.disableKnowledge = data.disable_knowledge;
 			cfg.llmProvider = str(data.llm_provider) ?? cfg.llmProvider;
 			cfg.llmModel = str(data.llm_model) ?? cfg.llmModel;
-			cfg.anthropicApiKey = str(data.anthropic_api_key);
-			cfg.anthropicBaseUrl = str(data.anthropic_base_url);
 			cfg.anthropicThinkingBudget = num(data.anthropic_thinking_budget);
-			cfg.openaiApiKey = str(data.openai_api_key);
-			cfg.openaiBaseUrl = str(data.openai_base_url);
 			cfg.notePath = str(data.note_path);
 			cfg.llmMaxTokens = num(data.llm_max_tokens);
 			if (typeof data.elide_old_view_hierarchies === "boolean") {
@@ -170,11 +212,10 @@ export function loadConfig(options: { tomlPath?: string; env?: NodeJS.ProcessEnv
 	}
 	cfg.llmProvider = env.PARA_LLM_PROVIDER || env.INSPECTOR_LLM_PROVIDER || cfg.llmProvider;
 	cfg.llmModel = env.PARA_LLM_MODEL || env.INSPECTOR_LLM_MODEL || env.ANTHROPIC_MODEL || cfg.llmModel;
-	cfg.anthropicApiKey = env.ANTHROPIC_API_KEY || cfg.anthropicApiKey;
-	cfg.anthropicBaseUrl = env.ANTHROPIC_BASE_URL || cfg.anthropicBaseUrl;
+	// Credentials & base URLs are pi's job now (~/.para/agent/models.json + auth.json).
+	// Para deliberately does NOT read ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL /
+	// OPENAI_* so it never collides with a separate proxy owning those globals.
 	if (env.ANTHROPIC_THINKING_BUDGET) cfg.anthropicThinkingBudget = Number(env.ANTHROPIC_THINKING_BUDGET) || undefined;
-	cfg.openaiApiKey = env.OPENAI_API_KEY || cfg.openaiApiKey;
-	cfg.openaiBaseUrl = env.OPENAI_BASE_URL || cfg.openaiBaseUrl;
 	cfg.notePath = env.PARA_NOTE_PATH || env.INSPECTOR_NOTE_PATH || cfg.notePath;
 	const envMode = (env.PARA_MODE || env.INSPECTOR_MODE || "").trim().toLowerCase();
 	if (envMode === "gui" || envMode === "code") cfg.mode = envMode;
@@ -189,16 +230,14 @@ export function loadConfig(options: { tomlPath?: string; env?: NodeJS.ProcessEnv
 	return cfg;
 }
 
-/** Copy keys pi / fetch will read into process.env (file → env, never overwrite). */
+/** Copy Para's inspector keys into process.env for a child `pi -e` (never overwrite). */
 export function applyConfigToEnv(cfg: ParaConfig, env: NodeJS.ProcessEnv = process.env): void {
 	const setIfAbsent = (key: string, value: string | undefined) => {
 		if (!value) return;
 		if (!env[key]) env[key] = value;
 	};
-	setIfAbsent("ANTHROPIC_API_KEY", cfg.anthropicApiKey);
-	setIfAbsent("ANTHROPIC_BASE_URL", cfg.anthropicBaseUrl);
-	setIfAbsent("OPENAI_API_KEY", cfg.openaiApiKey);
-	setIfAbsent("OPENAI_BASE_URL", cfg.openaiBaseUrl);
+	// No LLM credentials here on purpose: pi reads its own ~/.para/agent config, so
+	// Para must not touch ANTHROPIC_* / OPENAI_* (a separate proxy may own them).
 	setIfAbsent("PARA_INSPECTOR_HOST", cfg.inspectorHost);
 	setIfAbsent("PARA_INSPECTOR_PORT", String(cfg.inspectorPort));
 	if (cfg.inspectorDevice) setIfAbsent("PARA_DEVICE_UDID", cfg.inspectorDevice);
@@ -209,11 +248,71 @@ export function applyConfigToEnv(cfg: ParaConfig, env: NodeJS.ProcessEnv = proce
 	if (!cfg.autoTunnel) env.PARA_AUTO_TUNNEL = "0";
 }
 
+/** After device routing, overwrite inspector bind so a child `pi -e` sees the assigned port. */
+export function syncInspectorEnv(cfg: ParaConfig, env: NodeJS.ProcessEnv = process.env): void {
+	env.PARA_INSPECTOR_HOST = cfg.inspectorHost;
+	env.PARA_INSPECTOR_PORT = String(cfg.inspectorPort);
+	if (cfg.inspectorDevice) env.PARA_DEVICE_UDID = cfg.inspectorDevice;
+	if (cfg.inspectorPlatform !== "auto") env.PARA_INSPECTOR_PLATFORM = cfg.inspectorPlatform;
+	if (cfg.inspectorRemotePort !== undefined) env.PARA_INSPECTOR_REMOTE_PORT = String(cfg.inspectorRemotePort);
+}
+
+/** Env var names pi reads as the API key for a given provider id. */
+function providerEnvKeys(provider: string): string[] {
+	if (provider === "openai") return ["OPENAI_API_KEY"];
+	if (provider === "deepseek") return ["DEEPSEEK_API_KEY"];
+	// anthropic and anthropic-compatible gateways
+	return ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+}
+
+function readJson(path: string): Record<string, unknown> | null {
+	try {
+		if (!existsSync(path)) return null;
+		const parsed = JSON.parse(readFileSync(path, "utf8"));
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Best-effort pre-flight for `para doctor`: is a usable credential reachable
+ * for the configured provider? Credentials live in pi under Para's own agent
+ * home (~/.para/agent), so we check, in order: an apiKey on the provider in
+ * models.json → a stored auth.json credential → one of the provider's API-key
+ * env vars. This mirrors pi's own resolution well enough to warn early without
+ * duplicating its logic.
+ */
 export function llmKeySet(cfg: ParaConfig): boolean {
-	if (cfg.llmProvider === "openai") return Boolean(cfg.openaiApiKey || process.env.OPENAI_API_KEY);
-	return Boolean(cfg.anthropicApiKey || process.env.ANTHROPIC_API_KEY);
+	const provider = cfg.llmProvider.trim() || "anthropic";
+	const agentDir = getAgentDir();
+
+	const models = readJson(join(agentDir, "models.json"));
+	const providers = models && typeof models.providers === "object" ? (models.providers as Record<string, unknown>) : null;
+	// A custom provider selected by id (e.g. "super-relay") with its own apiKey.
+	const chosen = providers?.[provider];
+	if (chosen && typeof chosen === "object" && (chosen as Record<string, unknown>).apiKey) return true;
+	// Or ANY custom provider carrying an apiKey when llm_model matches a model it
+	// declares (users often leave llm_provider unset and just pick a model id).
+	if (providers && cfg.llmModel.trim()) {
+		const wanted = cfg.llmModel.trim().toLowerCase();
+		for (const value of Object.values(providers)) {
+			if (!value || typeof value !== "object") continue;
+			const p = value as Record<string, unknown>;
+			if (!p.apiKey) continue;
+			const list = Array.isArray(p.models) ? p.models : [];
+			if (list.some((m) => m && typeof m === "object" && String((m as Record<string, unknown>).id ?? "").toLowerCase() === wanted)) {
+				return true;
+			}
+		}
+	}
+
+	const auth = readJson(join(agentDir, "auth.json"));
+	if (auth && Object.keys(auth).length > 0) return true;
+
+	return providerEnvKeys(provider).some((name) => Boolean(process.env[name]));
 }
 
 export function defaultNotePath(cfg: ParaConfig): string {
-	return cfg.notePath || join(homedir(), ".ios-inspector", "NOTE.md");
+	return cfg.notePath || join(homedir(), ".para", "NOTE.md");
 }

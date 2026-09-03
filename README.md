@@ -26,10 +26,11 @@ bun src/cli.ts                 # 交互（GUI）
 bun src/cli.ts exec -m "当前是什么页面，不要点"
 ```
 
-两台同时插着时，默认 `8765` 给 iOS，避免抢端口。打 Android：
+两台同时插着时必须 `--device` 指定其一。每台设备的 Inspector 都在远端 `8765` 监听；Para 从本机 `8765` 起分配互不冲突的本地端口，并记在 `~/.ios-inspector/locks/device_ports.json`，不必手填 `--port`。
 
 ```bash
-bun src/cli.ts doctor --platform android --device <adb-serial> --port 18765
+bun src/cli.ts doctor --device <adb-serial>
+bun src/cli.ts doctor --device <ios-udid>
 ```
 
 只插 Android、或不传 `--platform` 但 `--device` 能对上 `adb devices` 时，tunnel 会自己 `adb forward`。端上 inspector 端口默认仍是 `8765`。
@@ -74,6 +75,6 @@ SQLite：Bun 用 `bun:sqlite`，`pi -e` 走 Node/jiti 时用 `node:sqlite`。不
 
 ## 现状
 
-已做：Inspector 客户端、GUI 工具、知识图谱、GUI/CODE 切换、iOS `iproxy` + Android `adb forward`、`para` CLI。
+已做：Inspector 客户端、GUI 工具、知识图谱、GUI/CODE 切换、iOS `iproxy` + Android `adb forward`、多机自动分端口、`para` CLI。
 
-刻意没做：视觉模型、`find_and_tap`、默认 bash（GUI 模式）、Web 控制台、多机自动分端口。Android 端若没有 `/api/vc_hierarchy`，`screen_digest` 仍可用。
+刻意没做：视觉模型、`find_and_tap`、默认 bash（GUI 模式）、Web 控制台、纯 TS usbmux 代理。Android 端若没有 `/api/vc_hierarchy`，`screen_digest` 仍可用。

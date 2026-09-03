@@ -49,6 +49,9 @@ export function nodeToDict(node: ViewNode, depth: number): Record<string, unknow
 	if (depth > 0 && node.children.length > 0) {
 		out.children = node.children.map((c) => nodeToDict(c, depth - 1));
 	}
+	if (node.presentedViews.length > 0) {
+		out.presented_views = node.presentedViews.map((p) => nodeToDict(p, depth));
+	}
 	return out;
 }
 

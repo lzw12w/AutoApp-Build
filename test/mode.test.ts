@@ -11,7 +11,7 @@ import {
 	switchModeTool,
 } from "../src/mode.ts";
 
-const PARA = ["tap", "screen_digest", "view_hierarchy", "find_view", "todo_write", "switch_mode", "record_knowledge"];
+const PARA = ["tap_with_diff", "screen_digest", "view_hierarchy", "find_view", "todo_write", "switch_mode", "record_knowledge"];
 const PARA_SET = new Set(PARA);
 
 describe("parseMode", () => {
@@ -41,9 +41,9 @@ describe("activeToolsForMode", () => {
 		expect(tools.includes("write")).toBe(false);
 	});
 
-	test("CODE is switch_mode + todo_write + coding builtins, never tap", () => {
+	test("CODE is switch_mode + todo_write + coding builtins, never tap_with_diff", () => {
 		const tools = activeToolsForMode("code", PARA);
-		expect(tools.includes("tap")).toBe(false);
+		expect(tools.includes("tap_with_diff")).toBe(false);
 		expect(tools.includes("screen_digest")).toBe(false);
 		expect(tools.includes("switch_mode")).toBe(true);
 		expect(tools.includes("todo_write")).toBe(true);
@@ -55,13 +55,13 @@ describe("modeBlockReason", () => {
 	test("GUI blocks coding-only tools", () => {
 		expect(modeBlockReason("gui", "bash", PARA_SET)).toMatch(/GUI mode/);
 		expect(modeBlockReason("gui", "write", PARA_SET)).toMatch(/GUI mode/);
-		expect(modeBlockReason("gui", "tap", PARA_SET)).toBeNull();
+		expect(modeBlockReason("gui", "tap_with_diff", PARA_SET)).toBeNull();
 		expect(modeBlockReason("gui", "read", PARA_SET)).toBeNull();
 		expect(modeBlockReason("gui", "switch_mode", PARA_SET)).toBeNull();
 	});
 
 	test("CODE blocks device tools, keeps switch_mode and todo_write", () => {
-		expect(modeBlockReason("code", "tap", PARA_SET)).toMatch(/CODE mode/);
+		expect(modeBlockReason("code", "tap_with_diff", PARA_SET)).toMatch(/CODE mode/);
 		expect(modeBlockReason("code", "record_knowledge", PARA_SET)).toMatch(/CODE mode/);
 		expect(modeBlockReason("code", "switch_mode", PARA_SET)).toBeNull();
 		expect(modeBlockReason("code", "todo_write", PARA_SET)).toBeNull();
@@ -117,7 +117,7 @@ describe("switch_mode tool", () => {
 		expect(payload.data.from).toBe("gui");
 		expect(payload.data.reason).toBe("need to edit a test");
 		expect(payload.data.tools.includes("write")).toBe(true);
-		expect(payload.data.tools.includes("tap")).toBe(false);
+		expect(payload.data.tools.includes("tap_with_diff")).toBe(false);
 		expect(state.mode).toBe("code");
 	});
 });

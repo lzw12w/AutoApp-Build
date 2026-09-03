@@ -7,10 +7,14 @@
  * only STRUCTURAL params participate in edge identity — content (address, x/y,
  * text) is preserved for human inspection but excluded from the dedup key.
  *
- *   tap / long_press / swipe / open_url / back / dismiss / set_lane → {} (a tap is a tap)
- *   scroll                → { axis, direction }  (axis+sign, not pixel delta)
+ *   tap / tap_with_diff / long_press → {} here (tool kwargs). After the
+ *     control is resolved, tap-target.ts may replace identity with
+ *     { class, property_name?, aid?, ancestor_chain? } when a role-level
+ *     handle exists; otherwise it stays {} so Feed cells still collapse.
+ *   scroll / swipe        → { axis, direction }
  *   input_text            → { submit, clear }
- *   switch_tab            → { index }
+ *   switch_tab            → { index } or { accessibility_id }
+ *   open_url / back / dismiss / appoint_feed_story → {}
  */
 
 export function identityForAction(toolName: string, input: Record<string, unknown>): Record<string, unknown> {
@@ -34,9 +38,9 @@ export function identityForAction(toolName: string, input: Record<string, unknow
 		case "input_text":
 			return pick(input, ["submit", "clear"]);
 		case "switch_tab":
-			return pick(input, ["index"]);
+			return pick(input, ["index", "accessibility_id"]);
 		default:
-			// tap, tap_with_diff, long_press, open_url, back, dismiss, set_lane, appoint_feed_story
+			// tap, tap_with_diff, long_press, open_url, back, dismiss, appoint_feed_story
 			return {};
 	}
 }

@@ -13,16 +13,18 @@ import { Cancelled, InspectorError } from "../errors.ts";
 import { type VCNode, ViewNode } from "../models.ts";
 import {
 	ambiguousFindAndTap,
+	applyVisibleOnly,
 	findNodeByAddress,
 	hasFindSelector,
 	localFindCandidates,
-	rankCandidates,
+	rankFindCandidates,
 	type FindSelector,
 } from "./find.ts";
 import { nodeSummary, vcSummary } from "./format.ts";
 import { guard, okResult } from "./result.ts";
 import { pollIntervalMs, pollUntil, settleVcDiffMs } from "./poll.ts";
 import { DIFF_MAX_ENTRIES, diffViewTrees, treeSignature, type ViewDiff } from "./view-diff.ts";
+import { reportTapTarget, type TapTargetHook } from "../knowledge/tap-target.ts";
 
 export const DIFF_DEPTH = 40;
 
@@ -184,27 +186,29 @@ function postCheckFromViewDiff(viewDiff: {
 	};
 }
 
-async function resolveFinderTarget(
+export async function resolveFinderTarget(
 	client: InspectorClient,
 	beforeView: ViewNode,
 	sel: FindSelector,
 	index: number | undefined,
 	signal?: AbortSignal,
 ): Promise<ViewNode> {
-	let candidates = rankCandidates(localFindCandidates(beforeView, sel, true));
+	let candidates = rankFindCandidates(localFindCandidates(beforeView, sel, true), sel);
 	if (candidates.length === 0) {
 		try {
-			candidates = rankCandidates(
-				await client.viewSearch(
-					{
-						text: sel.text,
-						cls: sel.cls,
-						accessibilityId: sel.accessibilityId,
-						propertyName: sel.propertyName,
-					},
-					signal,
-				),
+			// Mirror Python _view_search_candidates: filter server results to
+			// on-screen (fall back to all if none), THEN rank — otherwise an
+			// explicit index= picks a different node and ambiguity counts drift.
+			const searched = await client.viewSearch(
+				{
+					text: sel.text,
+					cls: sel.cls,
+					accessibilityId: sel.accessibilityId,
+					propertyName: sel.propertyName,
+				},
+				signal,
 			);
+			candidates = rankFindCandidates(applyVisibleOnly(searched, true), sel);
 		} catch {
 			candidates = [];
 		}
@@ -230,7 +234,7 @@ async function resolveFinderTarget(
 	return candidates[index ?? 0]!;
 }
 
-export function tapWithDiffTool(client: InspectorClient) {
+export function tapWithDiffTool(client: InspectorClient, hooks: { onTapTarget?: TapTargetHook } = {}) {
 	return defineTool({
 		name: "tap_with_diff",
 		label: "Tap with diff",
@@ -306,6 +310,7 @@ export function tapWithDiffTool(client: InspectorClient) {
 				}
 
 				const result = await client.tap({ address, x, y, signal });
+				reportTapTarget(hooks.onTapTarget, "tap", target, beforeView, { x: params.x, y: params.y });
 
 				const vcProbe = await probeVcDiff(client, beforeVc, { settleMs, pollMs, signal });
 				let viewDiff: (ViewDiff & { polls: number; settled_after_ms: number; stable: boolean }) | null = null;

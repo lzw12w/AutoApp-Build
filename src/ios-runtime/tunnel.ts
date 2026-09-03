@@ -378,6 +378,21 @@ export function localPortHeldByUs(port: number, identifier = "", platform = ""):
 	return false;
 }
 
+/** Local ports currently held by Para tunnels, mapped to UDID / adb serial. */
+export function heldInspectorPorts(): Record<number, string> {
+	const held: Record<number, string> = {};
+	for (const [, command] of iterProxyProcesses()) {
+		const args = proxyArgs(command);
+		if (!args) continue;
+		const port = Number.parseInt(args[0]!, 10);
+		if (Number.isInteger(port) && port >= 1 && port <= 65535) held[port] = proxyIdentifier(args);
+	}
+	for (const row of adbForwards()) {
+		if (held[row.localPort] === undefined) held[row.localPort] = row.serial;
+	}
+	return held;
+}
+
 /** Tear down our listener on `port` if we own it. Foreign processes are never killed. */
 export async function reclaimLocalPort(port: number, identifier = "", platform = ""): Promise<boolean> {
 	const ident = identifier.trim();

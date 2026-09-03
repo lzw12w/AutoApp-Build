@@ -102,6 +102,35 @@ describe("wait_for", () => {
 		expect(payload.data.reason).toContain("present");
 	});
 
+	test("vc_class ignores unselected tab siblings", async () => {
+		const t = new ScriptedTransport();
+		t.vcs = [
+			{
+				windows: [
+					{
+						rootViewController: {
+							class: "TabBarController",
+							address: "0xtab",
+							children: [
+								{ class: "MainFeedContainerViewController", address: "0xf", selected: true },
+								{ class: "UserHomePageViewController", address: "0xm", selected: false },
+							],
+						},
+					},
+				],
+			},
+		];
+		const onFeed = parse(
+			await tool(t).execute("w4", { vc_class: "Feed", timeout_ms: 0 }, undefined, undefined, ctx),
+		) as { ok: boolean };
+		t.vcI = 0;
+		const onMine = parse(
+			await tool(t).execute("w5", { vc_class: "UserHome", timeout_ms: 0 }, undefined, undefined, ctx),
+		) as { ok: boolean };
+		expect(onFeed.ok).toBe(true);
+		expect(onMine.ok).toBe(false);
+	});
+
 	test("times out with last evidence", async () => {
 		const t = new ScriptedTransport();
 		t.views = [windowTree([{ class: "UIView", address: "0xa", frame: { x: 0, y: 0, width: 10, height: 10 } }])];

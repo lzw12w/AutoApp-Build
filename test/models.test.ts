@@ -160,4 +160,12 @@ describe("TapResult.fromDict", () => {
 	test("via alias maps to method", () => {
 		expect(TapResult.fromDict({ via: "coordinate" }).method).toBe("coordinate");
 	});
+	test("nested view dict address is coerced to a hex string", () => {
+		const r = TapResult.fromDict({
+			method: "public_api",
+			address: { class: "YYLabel", address: "0xhit", hidden: false, accessibilityLabel: "long dump" },
+		});
+		expect(r.targetAddress).toBe("0xhit");
+		expect(r.handledBy).toBe("YYLabel");
+	});
 });

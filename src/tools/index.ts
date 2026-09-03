@@ -7,24 +7,37 @@
  * Screenshot returns an ImageContent block so the model sees the pixels;
  * everything else returns JSON or plain text (screen_digest).
  *
- * `mutates_ui` tools (tap/scroll/swipe/input/back/dismiss/switch_tab/open_url/
- * set_lane) drive UI state — the knowledge observer (Phase 3) hooks pi's
+ * `mutates_ui` tools (tap_with_diff/scroll/swipe/input/back/dismiss/switch_tab/open_url/
+ * appoint_feed_story) drive UI state — the knowledge observer (Phase 3) hooks pi's
  * tool_result event to attribute page transitions to them.
  */
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { InspectorClient } from "../client.ts";
 import { ViewNode, type VCNode } from "../models.ts";
+import { InspectorError } from "../errors.ts";
 import { buildScreenDigest, vcLabelFromVc } from "../screen-digest.ts";
+import { reportTapTarget, type TapTargetHook, usableTapNode } from "../knowledge/tap-target.ts";
+import {
+	applyVisibleOnly,
+	FIND_TREE_DEPTH,
+	localFindCandidates,
+	preferVisible,
+	rankFindCandidates,
+	tabIndexForTarget,
+	type FindSelector,
+} from "./find.ts";
 import { nodeSummary, nodeToDict, vcSummary } from "./format.ts";
-import { errResult, guard, okResult, textResult } from "./result.ts";
-import { tapWithDiffTool } from "./tap-with-diff.ts";
+import { compactInspectorAction, errResult, guard, okResult, textResult } from "./result.ts";
+import { screenFrameForMotion, scrollDeltaToSwipePoints } from "./scroll-motion.ts";
+import { DIGEST_DEPTH, snapshotStable } from "./snapshot.ts";
+import { resolveFinderTarget, tapWithDiffTool } from "./tap-with-diff.ts";
 import { waitForTool } from "./wait.ts";
 
 /** Tool names that change UI state — the single source of truth (Python's MUTATING_TOOL_NAMES). */
 export const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set([
-	"tap", "tap_with_diff", "long_press", "scroll", "swipe", "input_text", "dismiss", "back",
-	"switch_tab", "open_url", "set_lane", "appoint_feed_story",
+	"tap_with_diff", "long_press", "scroll", "swipe", "input_text", "dismiss", "back",
+	"switch_tab", "open_url", "appoint_feed_story",
 ]);
 
 type Details = { ok: boolean } & Record<string, unknown>;
@@ -32,14 +45,8 @@ type Details = { ok: boolean } & Record<string, unknown>;
 /** Called after a successful inspect fetch so the knowledge observer can seed `currentPage`. */
 export interface InspectHooks {
 	onInspect?: (view: ViewNode, vc: VCNode | null) => void | Promise<void>;
-}
-
-function placeholderWindow(): ViewNode {
-	return ViewNode.fromDict({
-		class: "UIWindow",
-		address: "",
-		frame: { x: 0, y: 0, width: 0, height: 0 },
-	});
+	/** Swap the pending tap/long_press action for a stable target summary. */
+	onTapTarget?: TapTargetHook;
 }
 
 async function feedInspect(
@@ -77,11 +84,7 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			parameters: Type.Object({}),
 			execute: (_id, _p, signal) =>
 				guard<Details>(
-					async () => {
-						const vc = await client.vcHierarchy(signal);
-						await feedInspect(hooks, placeholderWindow(), vc);
-						return vc;
-					},
+					() => client.vcHierarchy(signal),
 					(vc) => okResult(vcSummary(vc as never)),
 				),
 		}),
@@ -92,19 +95,30 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			name: "screen_digest",
 			label: "Screen digest",
 			description:
-				"Compact reading-order overview of the CURRENT screen: visible, content-bearing views only, " +
-				"as an indented plain-text list with each node's address. Preferred first look at a page — " +
-				"much cheaper than view_hierarchy. Use view_hierarchy when you need exact geometry or hidden nodes.",
-			parameters: Type.Object({
-				depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 40, default: 20 })),
-			}),
-			execute: (_id, params, signal) =>
+				"Reading-order navigation overview of the CURRENT screen. Preferred entry for multi-turn UI " +
+				"exploration or picking the next tap / scroll target — one stable, fully-expanded on-screen " +
+				"snapshot as compact plain text (no `depth` to guess, no truncation). Only VISIBLE views are " +
+				"included; pure-layout containers with no text, id, image or interactive role are dropped. " +
+				"Every remaining view is one line in DFS reading order; lines may include `aid=` (prefer that " +
+				"for tap_with_diff(accessibility_id=)) and always end with the real hex address. `@idx` is only a " +
+				"within-snapshot label). Leaf-only cells fold into one line. Updates the current-page snapshot " +
+				"like view_hierarchy. Drops geometry and styling — for design / visual QA use view_hierarchy " +
+				"+ view_inspect.",
+			parameters: Type.Object({}),
+			execute: (_id, _params, signal) =>
 				guard<Details>(
 					async () => {
-						const [tree, vc] = await Promise.all([
-							client.viewHierarchy({ depth: params.depth ?? 20, onScreenOnly: true, signal }),
-							client.vcHierarchy(signal).catch(() => null),
-						]);
+						const tree = await snapshotStable(
+							() =>
+								client.viewHierarchy({
+									depth: DIGEST_DEPTH,
+									includeHidden: false,
+									onScreenOnly: true,
+									signal,
+								}),
+							{ signal },
+						);
+						const vc = await client.vcHierarchy(signal).catch(() => null);
 						await feedInspect(hooks, tree, vc);
 						return { tree, vc };
 					},
@@ -122,40 +136,61 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			name: "view_hierarchy",
 			label: "View hierarchy",
 			description:
-				"Get the current view tree as nested JSON. Use when the task hinges on exact geometry, structure, " +
-				"hidden nodes, or a specific subtree by address. Each node has address, class, frame=[x,y,w,h] " +
-				"(points; omitted for zero-sized views), text (truncated to 80 chars), accessibility id. For " +
-				"UIImageView nodes the server surfaces image_symbol_name / image_asset_name so icon-only buttons " +
-				"can be identified.",
+				"Get the current view tree as nested JSON. Preferred when the task hinges on exact geometry, " +
+				"structure, hidden nodes, or a specific subtree by address. Auto-retries briefly if the snapshot " +
+				"appears unstable (mid-animation). Each node has address, class, frame=[x,y,w,h] (points; omitted " +
+				"for zero-sized views), text (truncated to 80 chars), accessibility id. For UIImageView nodes the " +
+				"server surfaces image_symbol_name / image_asset_name so icon-only buttons can be identified.",
 			parameters: Type.Object({
 				depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 30, default: 6 })),
 				include_hidden: Type.Optional(Type.Boolean({ default: false })),
 				on_screen_only: Type.Optional(Type.Boolean({ default: true })),
-				address: Type.Optional(Type.String({ description: "Root the tree at this hex address instead of the key window." })),
+				address: Type.Optional(Type.String({ description: "Root the tree at this hex address instead of the key window. Stability gate is skipped." })),
+				stability: Type.Optional(Type.Boolean({ default: true, description: "Wait for two consecutive snapshots to agree before returning." })),
 			}),
 			execute: (_id, params, signal) =>
 				guard<Details>(
 					async () => {
 						const depth = params.depth ?? 6;
-						const opts = {
-							depth,
-							includeHidden: params.include_hidden ?? false,
-							onScreenOnly: params.on_screen_only ?? true,
-							signal,
-						};
+						const includeHidden = params.include_hidden ?? false;
+						const onScreenOnly = params.on_screen_only ?? true;
+						const stability = params.address ? false : (params.stability ?? true);
+						const opts = { depth, includeHidden, onScreenOnly, signal };
 						const node = params.address
 							? await client.viewSubtree(params.address, opts)
-							: await client.viewHierarchy(opts);
+							: await snapshotStable(() => client.viewHierarchy(opts), { stability, signal });
 						if (hooks.onInspect) {
 							const vc = await client.vcHierarchy(signal).catch(() => null);
 							await feedInspect(hooks, node, vc);
 						}
-						return { node, depth };
+						return { node, depth, stability };
 					},
 					(data) => {
-						const { node, depth } = data as { node: Parameters<typeof nodeToDict>[0]; depth: number };
+						const { node, depth, stability } = data as {
+							node: Parameters<typeof nodeToDict>[0];
+							depth: number;
+							stability: boolean;
+						};
 						const tree = nodeToDict(node, depth);
-						return okResult({ ...tree, _meta: { total_nodes: node.totalNodeCount() } });
+						const meta: Record<string, unknown> = {
+							total_nodes: node.totalNodeCount(),
+							is_key_window: node.isKeyWindow,
+							stability_used: stability,
+							on_screen_only: params.on_screen_only ?? true,
+							contains_presented_sheet: node.containsPresentedSheet,
+						};
+						if (node.windowClass) meta.window_class = node.windowClass;
+						if (node.windowLevel !== null) meta.window_level = node.windowLevel;
+						if (node.presentedViews.length > 0) meta.presented_view_count = node.presentedViews.length;
+						if (node.offscreenChildCount) meta.offscreen_child_count = node.offscreenChildCount;
+						const extra = node.extra;
+						if (extra.resolved_from_view_controller) {
+							meta.resolved_from_view_controller = true;
+							if (extra.resolved_view_address) meta.resolved_view_address = extra.resolved_view_address;
+							if (extra.view_controller_class) meta.view_controller_class = extra.view_controller_class;
+							if (extra.resolve_hint) meta.hint = extra.resolve_hint;
+						}
+						return okResult({ ...tree, _meta: meta });
 					},
 				),
 		}),
@@ -167,30 +202,62 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			label: "Find view",
 			description:
 				"Find views matching text / class / accessibility id / property_name. Returns a ranked list of " +
-				"candidates. Use before tapping by text to inspect what would actually be hit.",
+				"candidates. Use before tapping by text to inspect what would actually be hit. `property_name` " +
+				"matches the Swift source-level identifier the server reflects from the view's superview / owning VC.",
 			parameters: Type.Object({
 				text: Type.Optional(Type.String()),
 				class: Type.Optional(Type.String({ description: "Substring match on UIKit class name." })),
 				accessibility_id: Type.Optional(Type.String()),
 				property_name: Type.Optional(Type.String({ description: "Substring match on reflected Swift property name." })),
 				max_results: Type.Optional(Type.Integer({ default: 8, maximum: 30 })),
+				visible_only: Type.Optional(Type.Boolean({ default: true, description: "Drop reuse-pool / off-screen hits. Default true." })),
 			}),
 			execute: (_id, params, signal) =>
 				guard<Details>(
-					() =>
-						client.viewSearch(
-							{
-								text: params.text,
-								cls: params.class,
-								accessibilityId: params.accessibility_id,
-								propertyName: params.property_name,
-							},
-							signal,
-						),
-					(nodes) => {
-						const list = nodes as Parameters<typeof nodeSummary>[0][];
+					async () => {
+						const sel: FindSelector = {
+							text: params.text,
+							cls: params.class,
+							accessibilityId: params.accessibility_id,
+							propertyName: params.property_name,
+						};
+						const visibleOnly = params.visible_only ?? true;
+						let results: ViewNode[] = [];
+						try {
+							results = await client.viewSearch(
+								{
+									text: params.text,
+									cls: params.class,
+									accessibilityId: params.accessibility_id,
+									propertyName: params.property_name,
+								},
+								signal,
+							);
+						} catch {
+							results = [];
+						}
+						if (results.length === 0) {
+							const tree = await client.viewHierarchy({
+								depth: FIND_TREE_DEPTH,
+								onScreenOnly: visibleOnly,
+								signal,
+							});
+							results = localFindCandidates(tree, sel, visibleOnly);
+						} else {
+							results = preferVisible(results);
+							results = applyVisibleOnly(results, visibleOnly);
+						}
+						results = rankFindCandidates(results, sel);
+						return { results, visibleOnly };
+					},
+					(data) => {
+						const { results, visibleOnly } = data as { results: ViewNode[]; visibleOnly: boolean };
 						const max = params.max_results ?? 8;
-						return okResult({ count: list.length, results: list.slice(0, max).map(nodeSummary) });
+						return okResult({
+							count: results.length,
+							results: results.slice(0, max).map(nodeSummary),
+							filtered_visible_only: visibleOnly,
+						});
 					},
 				),
 		}),
@@ -212,11 +279,16 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			label: "Screenshot",
 			description: "Capture a screenshot of the current screen. Returns the image so you can see the actual pixels.",
 			parameters: Type.Object({
-				quality: Type.Optional(Type.Number({ minimum: 0.1, maximum: 1.0, default: 0.7 })),
+				quality: Type.Optional(Type.Number({ minimum: 0.1, maximum: 1.0, default: 0.5 })),
+				scale: Type.Optional(Type.Number({ minimum: 0.25, maximum: 1.0, default: 0.5 })),
 			}),
 			async execute(_id, params, signal) {
 				try {
-					const raw = await client.screenshot({ quality: params.quality ?? 0.7, signal });
+					const raw = await client.screenshot({
+						quality: params.quality ?? 0.5,
+						scale: params.scale ?? 0.5,
+						signal,
+					});
 					const b64 = raw.base64 ?? raw.image ?? raw.data;
 					if (typeof b64 === "string" && b64) {
 						return {
@@ -263,7 +335,21 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			label: "Network log",
 			description: "Recent network requests captured by the inspector.",
 			parameters: Type.Object({ limit: Type.Optional(Type.Integer({ default: 20, maximum: 200 })) }),
-			execute: (_id, params, signal) => guard<Details>(() => client.networkLog(params.limit ?? 20, signal)),
+			execute: (_id, params, signal) =>
+				guard<Details>(async () => {
+					const raw = await client.networkLog(params.limit ?? 20, signal);
+					if (!raw || typeof raw !== "object" || !Array.isArray((raw as { items?: unknown }).items)) return raw;
+					const items = (raw as { items: unknown[] }).items.map((item) => {
+						if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+						const rec = { ...(item as Record<string, unknown>) };
+						delete rec.responseHeaders;
+						delete rec.requestHeaders;
+						delete rec.response_headers;
+						delete rec.request_headers;
+						return rec;
+					});
+					return { ...raw, items };
+				}),
 		}),
 	);
 
@@ -298,10 +384,10 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 		defineTool({
 			name: "ab_experiments",
 			label: "AB experiments",
-			description: "Read active A/B experiment assignments.",
+			description: "Read active AB experiment assignments exposed by the inspector.",
 			parameters: Type.Object({
 				keys: Type.Optional(Type.Array(Type.String())),
-				limit: Type.Optional(Type.Integer({ default: 30, maximum: 200 })),
+				limit: Type.Optional(Type.Integer({ default: 30, maximum: 500 })),
 			}),
 			execute: (_id, params, signal) =>
 				guard<Details>(() => client.abExperiments({ keys: params.keys, limit: params.limit ?? 30, signal })),
@@ -312,10 +398,10 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 		defineTool({
 			name: "feature_flags",
 			label: "Feature flags",
-			description: "Read feature-flag / settings values.",
+			description: "Read feature flag values exposed by the inspector.",
 			parameters: Type.Object({
 				keys: Type.Optional(Type.Array(Type.String())),
-				limit: Type.Optional(Type.Integer({ default: 30, maximum: 200 })),
+				limit: Type.Optional(Type.Integer({ default: 30, maximum: 500 })),
 			}),
 			execute: (_id, params, signal) =>
 				guard<Details>(() => client.featureFlags({ keys: params.keys, limit: params.limit ?? 30, signal })),
@@ -324,49 +410,59 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 
 	// ---- interaction (mutating) ---------------------------------------
 
-	tools.push(
-		defineTool({
-			name: "tap",
-			label: "Tap",
-			description:
-				"Tap a view by hex `address` or by both `x`/`y` coordinates. Prefer address (from screen_digest / " +
-				"find_view / view_hierarchy) over coordinates. For a tap that also reports what changed, prefer " +
-				"`tap_with_diff`. **Mutating**: fires the tap.",
-			parameters: Type.Object({
-				address: Type.Optional(Type.String()),
-				x: Type.Optional(Type.Number()),
-				y: Type.Optional(Type.Number()),
-				full: Type.Optional(Type.Boolean({ default: false, description: "Return the full server tap payload." })),
-			}),
-			execute: (_id, params, signal) =>
-				guard<Details>(
-					() => client.tap({ address: params.address, x: params.x, y: params.y, full: params.full, signal }),
-					(r) => {
-						const tr = r as { method: string; targetAddress: string | null; handledBy: string | null };
-						return okResult({ method: tr.method, target_address: tr.targetAddress, handled_by: tr.handledBy });
-					},
-				),
-		}),
-	);
-
-	tools.push(tapWithDiffTool(client));
+	tools.push(tapWithDiffTool(client, hooks));
 	tools.push(waitForTool(client, hooks));
 
 	tools.push(
 		defineTool({
 			name: "long_press",
 			label: "Long press",
-			description: "Long-press a view by `address` or `x`/`y`. **Mutating**.",
+			description:
+				"Long-press a view. Prefer `accessibility_id` from screen_digest (`aid=`), otherwise `address` or `x`/`y`. **Mutating**.",
 			parameters: Type.Object({
+				accessibility_id: Type.Optional(Type.String({ description: "Stable aid= from screen_digest." })),
 				address: Type.Optional(Type.String()),
 				x: Type.Optional(Type.Number()),
 				y: Type.Optional(Type.Number()),
 				duration: Type.Optional(Type.Number({ default: 0.6 })),
 			}),
 			execute: (_id, params, signal) =>
-				guard<Details>(() =>
-					client.longPress({ address: params.address, x: params.x, y: params.y, duration: params.duration, signal }),
-				),
+				guard<Details>(async () => {
+					let address = params.address as string | undefined;
+					if (!address && params.accessibility_id) {
+						const tree = await client.viewHierarchy({
+							depth: FIND_TREE_DEPTH,
+							includeHidden: false,
+							onScreenOnly: true,
+							signal,
+						});
+						const found = await resolveFinderTarget(
+							client,
+							tree,
+							{ accessibilityId: params.accessibility_id },
+							undefined,
+							signal,
+						);
+						address = found.address;
+					}
+					let target: ViewNode | null = null;
+					if (address) {
+						try {
+							target = usableTapNode(ViewNode.fromDict(await client.viewInspect(address, signal)));
+						} catch {
+							target = null;
+						}
+					}
+					const result = await client.longPress({
+						address,
+						x: params.x,
+						y: params.y,
+						duration: params.duration,
+						signal,
+					});
+					reportTapTarget(hooks.onTapTarget, "long_press", target, null, { x: params.x, y: params.y });
+					return compactInspectorAction(result);
+				}),
 		}),
 	);
 
@@ -375,18 +471,59 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			name: "scroll",
 			label: "Scroll",
 			description:
-				"Scroll a scroll view by content offset delta (dx, dy). Positive dy scrolls down. Optionally target a " +
-				"specific scroll view by `address`. **Mutating**.",
+				"Scroll via a swipe gesture. Positive dy reveals lower content; negative dy reveals earlier content. " +
+				"Omit `address` to target the main vertical list (collection/table), not a horizontal pager. " +
+				"**Mutating**.",
 			parameters: Type.Object({
 				dx: Type.Optional(Type.Number({ default: 0 })),
-				dy: Type.Optional(Type.Number({ default: 400 })),
-				address: Type.Optional(Type.String()),
+				dy: Type.Optional(Type.Number({ default: 400, description: "Positive = scroll down." })),
+				address: Type.Optional(Type.String({ description: "Optional scroll-view address." })),
+				duration: Type.Optional(Type.Number({ default: 0.25 })),
 				animated: Type.Optional(Type.Boolean({ default: true })),
 			}),
 			execute: (_id, params, signal) =>
-				guard<Details>(() =>
-					client.scroll({ dx: params.dx, dy: params.dy, address: params.address, animated: params.animated, signal }),
-				),
+				guard<Details>(async () => {
+					const dx = params.dx ?? 0;
+					const dy = params.dy ?? 400;
+					if (!dx && !dy) {
+						throw new InspectorError("scroll requires a non-zero dx or dy", "E_INVALID_ARGUMENT");
+					}
+					let address = params.address as string | undefined;
+					let frame: { x: number; y: number; width: number; height: number } | null = null;
+					if (!address) {
+						try {
+							const tree = await client.viewHierarchy({
+								depth: FIND_TREE_DEPTH,
+								includeHidden: false,
+								onScreenOnly: true,
+								signal,
+							});
+							frame = screenFrameForMotion(tree);
+						} catch {
+							frame = null;
+						}
+					}
+					if (address) {
+						try {
+							const inspected = ViewNode.fromDict(await client.viewInspect(address, signal));
+							frame = screenFrameForMotion(inspected);
+						} catch {
+							frame = null;
+						}
+					}
+					const points = scrollDeltaToSwipePoints(dx, dy, frame ?? undefined);
+					const duration = params.animated === false ? 0 : (params.duration ?? 0.25);
+					const result = (await client.swipe({
+						address,
+						startX: points.start_x,
+						startY: points.start_y,
+						endX: points.end_x,
+						endY: points.end_y,
+						duration,
+						signal,
+					})) as Record<string, unknown>;
+					return { ...compactInspectorAction(result), gesture: points, address: address ?? null };
+				}),
 		}),
 	);
 
@@ -408,18 +545,20 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 				duration: Type.Optional(Type.Number({ default: 0.25 })),
 			}),
 			execute: (_id, params, signal) =>
-				guard<Details>(() =>
-					client.swipe({
-						address: params.address,
-						startX: params.start_x,
-						startY: params.start_y,
-						endX: params.end_x,
-						endY: params.end_y,
-						dx: params.dx,
-						dy: params.dy,
-						duration: params.duration,
-						signal,
-					}),
+				guard<Details>(async () =>
+					compactInspectorAction(
+						await client.swipe({
+							address: params.address,
+							startX: params.start_x,
+							startY: params.start_y,
+							endX: params.end_x,
+							endY: params.end_y,
+							dx: params.dx,
+							dy: params.dy,
+							duration: params.duration,
+							signal,
+						}),
+					),
 				),
 		}),
 	);
@@ -429,30 +568,51 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			name: "input_text",
 			label: "Input text",
 			description:
-				"Type text into a field. Optionally target by `address` or `x`/`y`, clear existing text first, append, " +
-				"or submit after typing. **Mutating**.",
+				"Type text into a field. Prefer `accessibility_id` from screen_digest (`aid=`). " +
+				"Otherwise target by `address` or `x`/`y`. Omit the target only when a field is already focused. " +
+				"clear / append / submit are optional. **Mutating**.",
 			parameters: Type.Object({
 				text: Type.String(),
 				submit: Type.Optional(Type.Boolean({ default: false })),
 				clear: Type.Optional(Type.Boolean({ default: false })),
 				append: Type.Optional(Type.Boolean({ default: false })),
+				accessibility_id: Type.Optional(Type.String({ description: "Stable aid= from screen_digest." })),
 				address: Type.Optional(Type.String()),
 				x: Type.Optional(Type.Number()),
 				y: Type.Optional(Type.Number()),
 			}),
 			execute: (_id, params, signal) =>
-				guard<Details>(() =>
-					client.inputText({
-						text: params.text,
-						submit: params.submit,
-						clear: params.clear,
-						append: params.append,
-						address: params.address,
-						x: params.x,
-						y: params.y,
-						signal,
-					}),
-				),
+				guard<Details>(async () => {
+					let address = params.address as string | undefined;
+					if (!address && params.accessibility_id) {
+						const tree = await client.viewHierarchy({
+							depth: FIND_TREE_DEPTH,
+							includeHidden: false,
+							onScreenOnly: true,
+							signal,
+						});
+						const target = await resolveFinderTarget(
+							client,
+							tree,
+							{ accessibilityId: params.accessibility_id },
+							undefined,
+							signal,
+						);
+						address = target.address;
+					}
+					return compactInspectorAction(
+						await client.inputText({
+							text: params.text,
+							submit: params.submit,
+							clear: params.clear,
+							append: params.append,
+							address,
+							x: params.x,
+							y: params.y,
+							signal,
+						}),
+					);
+				}),
 		}),
 	);
 
@@ -460,9 +620,22 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 		defineTool({
 			name: "dismiss",
 			label: "Dismiss",
-			description: "Dismiss the top-most presented view controller (modal/sheet). **Mutating**.",
+			description:
+				"Dismiss the top-most presented view controller (modal/sheet). " +
+				"If nothing is presented, returns ok:false — it will not silently resign first-responder / keyboard. **Mutating**.",
 			parameters: Type.Object({ animated: Type.Optional(Type.Boolean({ default: true })) }),
-			execute: (_id, params, signal) => guard<Details>(() => client.dismiss(params.animated ?? true, signal)),
+			execute: (_id, params, signal) =>
+				guard<Details>(async () => {
+					const compacted = compactInspectorAction(await client.dismiss(params.animated ?? true, signal));
+					if (compacted.mode === "endEditing") {
+						throw new InspectorError(
+							"no presented view controller to dismiss (Inspector fell back to keyboard endEditing)",
+							"E_NO_PRESENTED",
+							compacted,
+						);
+					}
+					return compacted;
+				}),
 		}),
 	);
 
@@ -472,7 +645,8 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			label: "Back",
 			description: "Pop the top view controller off the navigation stack (system back). **Mutating**.",
 			parameters: Type.Object({ animated: Type.Optional(Type.Boolean({ default: true })) }),
-			execute: (_id, params, signal) => guard<Details>(() => client.back(params.animated ?? true, signal)),
+			execute: (_id, params, signal) =>
+				guard<Details>(async () => compactInspectorAction(await client.back(params.animated ?? true, signal))),
 		}),
 	);
 
@@ -480,13 +654,46 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 		defineTool({
 			name: "switch_tab",
 			label: "Switch tab",
-			description: "Switch the tab bar to a tab by `index` or `title`. **Mutating**.",
+			description:
+				"Switch the tab bar by `index`, `title`, or `accessibility_id` (prefer `aid=mainTab.item.*` from " +
+				"screen_digest — tab titles are often localization keys, not the visible name). **Mutating**.",
 			parameters: Type.Object({
 				index: Type.Optional(Type.Integer({ minimum: 0 })),
 				title: Type.Optional(Type.String()),
+				accessibility_id: Type.Optional(Type.String()),
 			}),
 			execute: (_id, params, signal) =>
-				guard<Details>(() => client.switchTab({ index: params.index, title: params.title, signal })),
+				guard<Details>(async () => {
+					let index = params.index as number | undefined;
+					const title = params.title as string | undefined;
+					if (index === undefined && !title && params.accessibility_id) {
+						const tree = await client.viewHierarchy({
+							depth: FIND_TREE_DEPTH,
+							includeHidden: false,
+							onScreenOnly: true,
+							signal,
+						});
+						const target = await resolveFinderTarget(
+							client,
+							tree,
+							{ accessibilityId: params.accessibility_id },
+							undefined,
+							signal,
+						);
+						const resolved = tabIndexForTarget(tree, target);
+						if (resolved === null) {
+							throw new InspectorError(
+								`aid=${JSON.stringify(params.accessibility_id)} is not inside a tab bar; use tap_with_diff(accessibility_id=)`,
+								"E_TARGET_NOT_FOUND",
+							);
+						}
+						index = resolved;
+					}
+					if (index === undefined && !title) {
+						throw new InspectorError("provide index, title, or accessibility_id", "E_INVALID_ARGUMENT");
+					}
+					return compactInspectorAction(await client.switchTab({ index, title, signal }));
+				}),
 		}),
 	);
 
@@ -499,7 +706,8 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 				url: Type.String(),
 				animated: Type.Optional(Type.Boolean({ default: true })),
 			}),
-			execute: (_id, params, signal) => guard<Details>(() => client.openUrl(params.url, params.animated ?? true, signal)),
+			execute: (_id, params, signal) =>
+				guard<Details>(async () => compactInspectorAction(await client.openUrl(params.url, params.animated ?? true, signal))),
 		}),
 	);
 
@@ -508,12 +716,36 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			name: "set_lane",
 			label: "Set lane",
 			description:
-				"Set the lane of a target env (`env` is 'boe' or 'ppe'). Empty `lane` clears it (env default). **Mutating**.",
+				"Set the lane for a target network env. `env` is REQUIRED and must be `boe` or `ppe`. " +
+				"Pass a `lane` name; omit or empty to clear (env default). Does not mutate the on-screen tree. " +
+				"Call device_info to read the current env / lane.",
 			parameters: Type.Object({
-				env: Type.String({ description: "'boe' or 'ppe'" }),
+				env: Type.Union([Type.Literal("boe"), Type.Literal("ppe")]),
 				lane: Type.Optional(Type.String()),
 			}),
 			execute: (_id, params, signal) => guard<Details>(() => client.setLane(params.env, params.lane ?? null, signal)),
+		}),
+	);
+
+	tools.push(
+		defineTool({
+			name: "appoint_feed_story",
+			label: "Appoint feed story",
+			description:
+				"Force-insert stories into the Feed. Sets the given story IDs and navigates back to the home Feed tab. " +
+				"Pass multiple IDs as a comma-separated string. **Mutating**.",
+			parameters: Type.Object({
+				story_ids: Type.String({ description: "Story IDs to insert, comma-separated (e.g. '123,456,789')" }),
+			}),
+			execute: (_id, params, signal) =>
+				guard<Details>(async () => {
+					const rawIds = params.story_ids.replace(/，/g, ",").split(",").map((s) => s.trim());
+					const validIds = rawIds.filter((sid) => /^\d+$/.test(sid));
+					if (validIds.length === 0) {
+						throw new InspectorError(`No valid numeric story IDs found in: ${params.story_ids}`, "E_INVALID_ARGS");
+					}
+					return client.appointFeedStories({ storyIds: validIds, signal });
+				}),
 		}),
 	);
 

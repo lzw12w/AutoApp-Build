@@ -1,6 +1,6 @@
 /**
  * Resolve the running app's bundle id so the knowledge graph lands in
- * `~/.ios-inspector/knowledge/<bundle>.db` instead of a shared fallback.
+ * `~/.para/knowledge/<bundle>.db` instead of a shared fallback.
  *
  * Inspector payloads are inconsistent: some put the id on `app_state`
  * (`bundle_id` / `CFBundleIdentifier` / nested `app`), others only on

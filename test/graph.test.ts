@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { PageFingerprint } from "../src/knowledge/fingerprint.ts";
 import { PageMatcher, PathPlanner, pathHops } from "../src/knowledge/graph.ts";
 import { KnowledgeStore } from "../src/knowledge/store.ts";
+import { resolveNavigateTarget } from "../src/tools/knowledge.ts";
 
 function fp(skeleton: string, vcClass: string): PageFingerprint {
 	return {
@@ -116,6 +117,38 @@ describe("PathPlanner Dijkstra", () => {
 		const path = planner.findPath(a, c);
 		// The reliable 2-hop route should beat the failing 1-hop one.
 		expect(pathHops(path!)).toBe(2);
+		store.close();
+	});
+});
+
+describe("resolveNavigateTarget", () => {
+	test("matches a substring of the VC class (Home → UserHomePage)", () => {
+		const store = memStore();
+		const feed = store.upsertPage(fp("ffffffffffffffff", "MainFeedContainerViewController"));
+		const mine = store.upsertPage(fp("mmmmmmmmmmmmmmmm", "UserHomePageViewController"));
+		expect(resolveNavigateTarget(store, "Home").best).toBe(mine);
+		expect(resolveNavigateTarget(store, "Feed").best).toBe(feed);
+		store.close();
+	});
+
+	test("excludes the current page from candidates", () => {
+		const store = memStore();
+		const feed = store.upsertPage(fp("ffffffffffffffff", "MainFeedContainerViewController"));
+		store.upsertPage(fp("mmmmmmmmmmmmmmmm", "UserHomePageViewController"));
+		expect(resolveNavigateTarget(store, "Feed", feed).best).toBeNull();
+		store.close();
+	});
+
+	test("matches a tab aid last segment (Mine → page reached by mainTab.item.mine)", () => {
+		const store = memStore();
+		const feed = store.upsertPage(fp("ffffffffffffffff", "MainFeedContainerViewController"));
+		const mine = store.upsertPage(fp("mmmmmmmmmmmmmmmm", "UserHomePageViewController"));
+		store.recordTransition(feed, mine, {
+			actionType: "switch_tab",
+			actionParams: { accessibility_id: "mainTab.item.mine", __identity__: { accessibility_id: "mainTab.item.mine" } },
+			success: true,
+		});
+		expect(resolveNavigateTarget(store, "Mine").best).toBe(mine);
 		store.close();
 	});
 });

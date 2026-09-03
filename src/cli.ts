@@ -9,15 +9,14 @@
  *   para tools           list registered tool names
  */
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { applyConfigToEnv, loadConfig, type ParaConfig } from "./config.ts";
+import { fileURLToPath } from "node:url";
+import { applyAgentDir, applyConfigToEnv, loadConfig, syncInspectorEnv, type ParaConfig } from "./config.ts";
 import { execExitCode, EXTENSION_PATH, listParaTools, probeDoctor, runExec } from "./exec.ts";
-
-const require = createRequire(import.meta.url);
+import { resolveIntoConfig } from "./ios-runtime/device-registry.ts";
 
 function piCliPath(): string {
-	const entry = require.resolve("@earendil-works/pi-coding-agent");
+	const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 	return join(dirname(entry), "bundle", "cli.js");
 }
 
@@ -30,15 +29,19 @@ Usage:
   para doctor [--json]       Inspector + API-key probe
   para tools                 List tools this extension registers
 
-Config: ~/.ios-inspector/config.toml, then env
+Config: ~/.para/config.toml, then env
   PARA_INSPECTOR_HOST / INSPECTOR_HOST   (default localhost)
-  PARA_INSPECTOR_PORT / INSPECTOR_PORT   (default 8765)
-  PARA_DEVICE_UDID / INSPECTOR_DEVICE
+  PARA_INSPECTOR_PORT / INSPECTOR_PORT   (default 8765; --device 会自动改写)
+  PARA_DEVICE_UDID / --device            UDID 或 adb serial；多机必填，自动分配本地端口
   PARA_INSPECTOR_PLATFORM / --platform   auto | ios | android
   PARA_INSPECTOR_REMOTE_PORT / --remote-port
   PARA_MODE / --para-mode          gui (device) or code (repo)
-  ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
-  OPENAI_API_KEY / OPENAI_BASE_URL
+
+LLM: configured in pi, from Para's own home. Add a provider (baseUrl + apiKey +
+  models) to ~/.para/agent/models.json, then select it with llm_model in
+  config.toml or --model. Kept separate from ~/.pi/agent; Para never reads
+  ANTHROPIC_* / OPENAI_*, so a separate proxy can own those.
+  (override home with PARA_AGENT_DIR)
 `);
 }
 
@@ -87,9 +90,44 @@ function withCliOverrides(argv: string[]): { cfg: ParaConfig; rest: string[] } {
 	return { cfg: loadConfig({ env }), rest };
 }
 
-function runInteractive(piArgs: string[]): Promise<number> {
+/**
+ * Derive pi's thinking level from the Para config, matching exec.ts exactly:
+ * a budget only enables thinking at the Anthropic minimum (>=1024), and stays
+ * OFF otherwise. This keeps interactive (`para` / `para chat`) aligned with
+ * `para exec` and with the original Python default (thinking off), instead of
+ * inheriting pi's coding-agent DEFAULT_THINKING_LEVEL="medium".
+ */
+function configThinkingLevel(cfg: ParaConfig): "off" | "medium" | "high" {
+	const budget = cfg.anthropicThinkingBudget ?? 0;
+	if (budget >= 8192) return "high";
+	if (budget >= 1024) return "medium";
+	return "off";
+}
+
+function hasArg(argv: string[], name: string): boolean {
+	return argv.some((a) => a === name || a.startsWith(`${name}=`));
+}
+
+function runInteractive(cfg: ParaConfig, piArgs: string[]): Promise<number> {
+	const injected: string[] = [];
+	// Pin the model from Para config so interactive matches `para exec`, instead
+	// of letting pi fall through to its provider default. The model id and its
+	// provider both resolve through Para's own ~/.para/agent/models.json (which
+	// carries the gateway baseUrl + apiKey), so no env/provider injection here.
+	// Skip only when the user drove model selection themselves (--model/--models).
+	if (cfg.llmModel.trim() && !hasArg(piArgs, "--model") && !hasArg(piArgs, "--models")) {
+		if (cfg.llmProvider.trim() && !hasArg(piArgs, "--provider")) {
+			injected.push("--provider", cfg.llmProvider);
+		}
+		injected.push("--model", cfg.llmModel);
+	}
+	// Only inject our thinking default when the user did not set --thinking
+	// themselves; pi treats an explicit --thinking as the final override (main.js).
+	if (!hasArg(piArgs, "--thinking")) {
+		injected.push("--thinking", configThinkingLevel(cfg));
+	}
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, [piCliPath(), "-e", EXTENSION_PATH, ...piArgs], {
+		const child = spawn(piCliPath(), ["-e", EXTENSION_PATH, ...injected, ...piArgs], {
 			stdio: "inherit",
 			env: process.env,
 		});
@@ -101,8 +139,12 @@ function runInteractive(piArgs: string[]): Promise<number> {
 function formatDoctorText(d: Awaited<ReturnType<typeof probeDoctor>>): string {
 	const ping = d.inspector.reachable ? "ok" : `fail (${JSON.stringify(d.inspector.error)})`;
 	const llm = d.llm.key_set ? "key set" : d.llm.error;
+	const device = d.device
+		? `${d.device.platform} ${d.device.id} → 127.0.0.1:${d.device.local_port} (remote ${d.device.remote_port})`
+		: "unspecified";
 	return [
 		`inspector  ${d.inspector.base_url}  ${ping}`,
+		`device     ${device}`,
 		`llm        provider=${d.llm.provider}  ${llm}`,
 		`tunnel     ${d.tunnel.action ?? "?"}  ${d.tunnel.detail ?? ""}`,
 		`result     ${d.ok ? "ok" : d.code}`,
@@ -111,6 +153,10 @@ function formatDoctorText(d: Awaited<ReturnType<typeof probeDoctor>>): string {
 }
 
 async function main(argv: string[]): Promise<number> {
+	// Point pi at Para's own agent home (~/.para/agent) before any pi code —
+	// ModelRuntime, getAgentDir, or a spawned child pi — reads its config.
+	applyAgentDir();
+
 	const head = argv[0];
 	if (head === "-h" || head === "--help" || head === "help") {
 		printHelp();
@@ -142,8 +188,14 @@ async function main(argv: string[]): Promise<number> {
 
 	const chatArgs = head === "chat" ? argv.slice(1) : argv;
 	const { cfg, rest } = withCliOverrides(chatArgs);
+	const deviceError = await resolveIntoConfig(cfg, { missingOk: !cfg.inspectorDevice.trim() });
+	if (deviceError) {
+		process.stderr.write(`${deviceError}\n`);
+		return 1;
+	}
 	applyConfigToEnv(cfg);
-	return runInteractive(rest);
+	syncInspectorEnv(cfg);
+	return runInteractive(cfg, rest);
 }
 
 const code = await main(process.argv.slice(2));

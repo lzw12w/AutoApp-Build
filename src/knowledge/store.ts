@@ -226,7 +226,7 @@ export class KnowledgeStore {
 	}
 
 	static forApp(bundleId: string, root?: string): KnowledgeStore {
-		const base = root ?? join(homedir(), ".ios-inspector", "knowledge");
+		const base = root ?? join(homedir(), ".para", "knowledge");
 		mkdirSync(base, { recursive: true });
 		return new KnowledgeStore(join(base, `${safeBundleId(bundleId)}.db`));
 	}

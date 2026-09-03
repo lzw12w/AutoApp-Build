@@ -61,8 +61,8 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 	});
 
 export class Transport {
-	readonly host: string;
-	readonly port: number;
+	host: string;
+	port: number;
 	readonly timeoutMs: number;
 	private readonly onFailure?: DiagnoseCallback;
 	private diagnosing = false;
@@ -79,6 +79,20 @@ export class Transport {
 		this.port = options.port ?? 8765;
 		this.timeoutMs = options.timeoutMs ?? 5000;
 		this.onFailure = options.onFailure;
+	}
+
+	/** Point this transport at a different local inspector after device routing. */
+	retarget(options: { host?: string; port?: number }): void {
+		if (options.host !== undefined) {
+			if (!ALLOWED_HOSTS.has(options.host)) {
+				throw new InspectorError(
+					`Refusing non-local inspector host ${JSON.stringify(options.host)}; use port forwarding (iproxy) for real devices.`,
+					"E_INVALID_ARGUMENT",
+				);
+			}
+			this.host = options.host;
+		}
+		if (options.port !== undefined) this.port = options.port;
 	}
 
 	get baseUrl(): string {

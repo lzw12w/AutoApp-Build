@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyConfigToEnv, loadConfig, parseFlatToml } from "../src/config.ts";
+import { applyConfigToEnv, loadConfig, parseFlatToml, syncInspectorEnv } from "../src/config.ts";
 import { resolveExecModel } from "../src/exec.ts";
 
 describe("parseFlatToml", () => {
@@ -15,6 +15,15 @@ llm_provider = 'anthropic'
 		expect(data.disable_knowledge).toBe(true);
 		expect(data.llm_provider).toBe("anthropic");
 	});
+
+	test("does not strip # inside quoted values", () => {
+		const data = parseFlatToml(`
+note_path = "/foo#bar"
+base_url = 'https://x/y#frag' # trailing comment
+`);
+		expect(data.note_path).toBe("/foo#bar");
+		expect(data.base_url).toBe("https://x/y#frag");
+	});
 });
 
 describe("loadConfig", () => {
@@ -25,12 +34,24 @@ describe("loadConfig", () => {
 				INSPECTOR_HOST: "10.0.0.1",
 				PARA_INSPECTOR_HOST: "localhost",
 				PARA_INSPECTOR_PORT: "8777",
-				ANTHROPIC_API_KEY: "sk-test",
 			},
 		});
 		expect(cfg.inspectorHost).toBe("localhost");
 		expect(cfg.inspectorPort).toBe(8777);
-		expect(cfg.anthropicApiKey).toBe("sk-test");
+	});
+
+	test("does not read ANTHROPIC_* / OPENAI_* env (pi owns LLM config)", () => {
+		const cfg = loadConfig({
+			tomlPath: "/this/does/not/exist.toml",
+			env: {
+				ANTHROPIC_API_KEY: "sk-should-be-ignored",
+				ANTHROPIC_BASE_URL: "http://127.0.0.1:15721/claude-desktop",
+				OPENAI_API_KEY: "sk-openai-ignored",
+			},
+		});
+		expect(cfg).not.toHaveProperty("anthropicApiKey");
+		expect(cfg).not.toHaveProperty("anthropicBaseUrl");
+		expect(cfg).not.toHaveProperty("openaiApiKey");
 	});
 
 	test("PARA_INSPECTOR_PLATFORM and remote port map through", () => {
@@ -67,28 +88,44 @@ describe("loadConfig", () => {
 		expect(cfg.elideKeepRecent).toBe(4);
 	});
 
-	test("applyConfigToEnv does not overwrite existing keys", () => {
-		const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "from-env" };
-		applyConfigToEnv({ ...loadConfig({ tomlPath: "/nope", env: {} }), anthropicApiKey: "from-file" }, env);
-		expect(env.ANTHROPIC_API_KEY).toBe("from-env");
+	test("applyConfigToEnv sets inspector keys and never touches ANTHROPIC_*", () => {
+		const env: NodeJS.ProcessEnv = {};
+		applyConfigToEnv(loadConfig({ tomlPath: "/nope", env: {} }), env);
 		expect(env.PARA_INSPECTOR_HOST).toBe("localhost");
+		expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+		expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+	});
+
+	test("syncInspectorEnv overwrites the assigned port", () => {
+		const env: NodeJS.ProcessEnv = { PARA_INSPECTOR_PORT: "8765" };
+		const cfg = loadConfig({ tomlPath: "/nope", env: {} });
+		cfg.inspectorPort = 8766;
+		cfg.inspectorDevice = "SERIAL";
+		cfg.inspectorPlatform = "android";
+		cfg.inspectorRemotePort = 8765;
+		syncInspectorEnv(cfg, env);
+		expect(env.PARA_INSPECTOR_PORT).toBe("8766");
+		expect(env.PARA_DEVICE_UDID).toBe("SERIAL");
+		expect(env.PARA_INSPECTOR_PLATFORM).toBe("android");
+		expect(env.PARA_INSPECTOR_REMOTE_PORT).toBe("8765");
 	});
 });
 
 describe("resolveExecModel", () => {
-	test("builds a gateway model from llm_model + anthropic_base_url", () => {
+	test("matches llm_model against pi's available catalog by id", () => {
+		const available = [
+			{ id: "qwen3.8-max", name: "qwen3.8-max" },
+			{ id: "model_api/experimental_0630", name: "Experimental 0630" },
+		] as unknown as Parameters<typeof resolveExecModel>[1];
 		const model = resolveExecModel(
-			{
-				...loadConfig({ tomlPath: "/nope", env: {} }),
-				llmModel: "deepseek-v4-flash",
-				anthropicBaseUrl: "https://api.deepseek.com/anthropic/",
-				llmMaxTokens: 32768,
-			},
-			[],
+			{ ...loadConfig({ tomlPath: "/nope", env: {} }), llmModel: "qwen3.8-max" },
+			available,
 		);
-		expect(model?.id).toBe("deepseek-v4-flash");
-		expect(model?.api).toBe("anthropic-messages");
-		expect(model?.baseUrl).toBe("https://api.deepseek.com/anthropic");
-		expect(model?.maxTokens).toBe(32768);
+		expect(model?.id).toBe("qwen3.8-max");
+	});
+
+	test("returns undefined when llm_model is unset", () => {
+		const model = resolveExecModel(loadConfig({ tomlPath: "/nope", env: {} }), []);
+		expect(model).toBeUndefined();
 	});
 });

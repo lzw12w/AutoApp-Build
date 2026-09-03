@@ -238,11 +238,13 @@ function cmpEntry(a: FlatEntry, b: FlatEntry): number {
 
 function frameList(node: ViewNode): number[] | null {
 	if (node.frame.width <= 0 || node.frame.height <= 0) return null;
+	// Python _frame uses int(x+0.5) — truncate toward zero, matching negative
+	// (superview-relative) offsets. Math.floor would be off-by-one below zero.
 	return [
-		Math.floor(node.frame.x + 0.5),
-		Math.floor(node.frame.y + 0.5),
-		Math.floor(node.frame.width + 0.5),
-		Math.floor(node.frame.height + 0.5),
+		Math.trunc(node.frame.x + 0.5),
+		Math.trunc(node.frame.y + 0.5),
+		Math.trunc(node.frame.width + 0.5),
+		Math.trunc(node.frame.height + 0.5),
 	];
 }
 

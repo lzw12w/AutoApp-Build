@@ -46,6 +46,27 @@ describe("buildScreenDigest", () => {
 		expect(digest).not.toContain("UIStackView");
 	});
 
+	test("drops full-screen layout container that only has a Tap recognizer", () => {
+		const tree = node({
+			class: "UIWindow",
+			address: "0x1",
+			frame: { x: 0, y: 0, width: 400, height: 800 },
+			children: [
+				{
+					class: "UILayoutContainerView",
+					address: "0xlayout",
+					frame: { x: 0, y: 0, width: 400, height: 800 },
+					gestureRecognizers: ["UITapGestureRecognizer"],
+					children: [{ class: "UIButton", address: "0xbtn", frame: { x: 10, y: 10, width: 80, height: 40 }, text: "Go" }],
+				},
+			],
+		});
+		const digest = buildScreenDigest(tree);
+		expect(digest).toContain('"Go"');
+		expect(digest).not.toContain("UILayoutContainerView");
+		expect(digest).not.toContain("0xlayout");
+	});
+
 	test("folds leaf-only cell (icon + label) into one line", () => {
 		const tree = node({
 			class: "UIWindow",
@@ -70,6 +91,34 @@ describe("buildScreenDigest", () => {
 		expect(lines[0]).toContain("StoryCell");
 		expect(lines[0]).toContain('"Debug"');
 		expect(lines[0]).toContain("asset=icon_x");
+	});
+
+	test("folding a labeled child keeps its role aid on the parent line", () => {
+		const tree = node({
+			class: "UIWindow",
+			address: "0x1",
+			frame: { x: 0, y: 0, width: 400, height: 800 },
+			children: [
+				{
+					class: "UIView",
+					address: "0xwrap",
+					frame: { x: 0, y: 100, width: 380, height: 80 },
+					propertyName: "contentView",
+					children: [
+						{
+							class: "YYLabel",
+							address: "0xlbl",
+							frame: { x: 8, y: 8, width: 360, height: 64 },
+							text: "（你和旧友出门吃夜宵，Chloe看向远处）",
+							accessibilityIdentifier: "messageBubble.text",
+						},
+					],
+				},
+			],
+		});
+		const digest = buildScreenDigest(tree);
+		expect(digest).toContain("aid=messageBubble.text");
+		expect(digest).toContain("Chloe");
 	});
 
 	test("empty screen renders a placeholder line", () => {

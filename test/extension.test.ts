@@ -49,7 +49,7 @@ describe("extension entry", () => {
 
 		expect(tools.has("ping")).toBe(true);
 		expect(tools.has("screen_digest")).toBe(true);
-		expect(tools.has("tap")).toBe(true);
+		expect(tools.has("tap")).toBe(false);
 		expect(tools.has("tap_with_diff")).toBe(true);
 		expect(tools.has("wait_for")).toBe(true);
 		expect(tools.has("view_hierarchy")).toBe(true);
@@ -134,7 +134,7 @@ describe("extension entry", () => {
 		expect(code.includes("edit")).toBe(true);
 		expect(code.includes("switch_mode")).toBe(true);
 		expect(code.includes("todo_write")).toBe(true);
-		expect(code.includes("tap")).toBe(false);
+		expect(code.includes("tap_with_diff")).toBe(false);
 		expect(code.includes("screen_digest")).toBe(false);
 		for (const name of CODE_BUILTIN_TOOLS) expect(code.includes(name)).toBe(true);
 
@@ -149,14 +149,14 @@ describe("extension entry", () => {
 		expect(await compact()).toBeUndefined();
 
 		const toolCall = events.get("tool_call") as (event: { toolName: string }) => Promise<{ block?: boolean; reason?: string } | void>;
-		const blockedTap = await toolCall({ toolName: "tap" });
+		const blockedTap = await toolCall({ toolName: "tap_with_diff" });
 		expect(blockedTap?.block).toBe(true);
 		expect(blockedTap?.reason).toMatch(/CODE mode/);
 		expect(await toolCall({ toolName: "bash" })).toBeUndefined();
 
 		await commands.get("gui")!("", { ui });
 		const gui = getActive() ?? [];
-		expect(gui.includes("tap")).toBe(true);
+		expect(gui.includes("tap_with_diff")).toBe(true);
 		expect(gui.includes("bash")).toBe(false);
 		expect(gui.filter((n) => n !== "read")).toEqual([...tools.keys()]);
 	});
@@ -166,7 +166,7 @@ describe("extension entry", () => {
 		const start = events.get("session_start") as (event: unknown, ctx: { ui: typeof ui }) => Promise<void>;
 		await start({}, { ui });
 		expect(getActive()?.includes("write")).toBe(true);
-		expect(getActive()?.includes("tap")).toBe(false);
+		expect(getActive()?.includes("tap_with_diff")).toBe(false);
 
 		const switcher = tools.get("switch_mode") as {
 			execute: (
@@ -182,7 +182,7 @@ describe("extension entry", () => {
 		expect(payload.ok).toBe(true);
 		expect(payload.data.mode).toBe("gui");
 		expect(payload.data.from).toBe("code");
-		expect(getActive()?.includes("tap")).toBe(true);
+		expect(getActive()?.includes("tap_with_diff")).toBe(true);
 		expect(getActive()?.includes("bash")).toBe(false);
 	});
 

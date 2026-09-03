@@ -60,24 +60,68 @@ function pathToDict(store: KnowledgeStore, path: PathResult): Record<string, unk
 	};
 }
 
-/** Resolve a target string (page_id / VC class / canonical name) to a page id. */
-function resolveTarget(store: KnowledgeStore, target: string): string | null {
+/** Resolve a target string (page_id / VC class / canonical name / fuzzy) to a page id. */
+export function resolveNavigateTarget(
+	store: KnowledgeStore,
+	target: string,
+	fromPage?: string | null,
+	topK = 3,
+): { best: string | null; candidates: { page_id: string; name: string | null; vc_class_hint: string | null; score: number }[] } {
 	const t = target.trim();
-	if (!t) return null;
-	// Direct page id.
-	if (t.startsWith("p_") && store.getPage(t, false)) return t;
-	// Exact VC class.
-	const byClass = store.findPagesByVcClass(t);
-	if (byClass.length > 0) return byClass[0]!.pageId;
-	// Canonical name (exact, then substring).
-	const pages = store.listPages(500);
-	for (const p of pages) {
-		if (p.canonicalName && p.canonicalName.toLowerCase() === t.toLowerCase()) return p.pageId;
+	if (!t) return { best: null, candidates: [] };
+	if (t.startsWith("p_") && store.getPage(t, false)) {
+		const page = store.getPage(t, false)!;
+		return {
+			best: t,
+			candidates: [{ page_id: t, name: page.canonicalName, vc_class_hint: page.vcClassHint, score: 100 }],
+		};
 	}
-	for (const p of pages) {
-		if (p.canonicalName && p.canonicalName.toLowerCase().includes(t.toLowerCase())) return p.pageId;
+	const needle = t.toLowerCase();
+	const scored: { score: number; page_id: string; name: string | null; vc_class_hint: string | null }[] = [];
+	for (const page of store.listPages(500)) {
+		if (fromPage && page.pageId === fromPage) continue;
+		let score = 0;
+		if (page.vcClassHint) {
+			const vcL = page.vcClassHint.toLowerCase();
+			if (vcL === needle) score += 20;
+			else if (needle.length >= 3 && (vcL.includes(needle) || needle.includes(vcL))) score += 8;
+		}
+		if (page.canonicalName) {
+			const nameL = page.canonicalName.toLowerCase();
+			if (nameL === needle) score += 10;
+			else if (needle.length >= 2 && (nameL.includes(needle) || needle.includes(nameL))) score += 5;
+		}
+		if (score === 0) {
+			const full = store.getPage(page.pageId, true);
+			if (full) {
+				for (const fp of full.fingerprints) {
+					if (fp.title && fp.title.toLowerCase().includes(needle)) score += 3;
+					if (fp.keyTexts.some((text) => text.toLowerCase().includes(needle))) {
+						score += 1;
+						break;
+					}
+				}
+			}
+		}
+		for (const tr of store.edgesTo(page.pageId)) {
+			const aid = tr.actionParams.accessibility_id;
+			if (typeof aid !== "string" || !aid) continue;
+			const last = aid.split(".").pop()?.toLowerCase() ?? "";
+			if (last === needle) score += 9;
+			else if (last.replace(/_/g, "").includes(needle) && needle.length >= 4) score += 6;
+		}
+		if (score > 0) {
+			scored.push({
+				score,
+				page_id: page.pageId,
+				name: page.canonicalName,
+				vc_class_hint: page.vcClassHint,
+			});
+		}
 	}
-	return null;
+	scored.sort((a, b) => b.score - a.score);
+	const candidates = scored.slice(0, topK);
+	return { best: candidates[0]?.page_id ?? null, candidates };
 }
 
 function nameSuggestions(store: KnowledgeStore, limit = 8): string[] {
@@ -126,10 +170,11 @@ export function buildKnowledgeTools(kc: KnowledgeContext) {
 			label: "Navigate to page",
 			description:
 				"Plan the cheapest known action path from the current page to a target. Target may be a page_id " +
-				"(starts with 'p_'), a ViewController class name, or a canonical page name. Returns the ordered steps " +
+				"(starts with 'p_'), a ViewController class name, a canonical page name, or a substring of either " +
+				"(`Home` matches `UserHomePageViewController`). Returns the ordered steps " +
 				"(does NOT execute them — issue the taps yourself). Requires the graph to have learned a route.",
 			parameters: Type.Object({
-				target: Type.String({ description: "Target page_id, ViewController class, or canonical name." }),
+				target: Type.String({ description: "Target page_id, ViewController class, canonical name, or a substring of those." }),
 				max_steps: Type.Optional(Type.Integer({ default: 8, minimum: 1, maximum: 30 })),
 				top_k_candidates: Type.Optional(Type.Integer({ default: 3, minimum: 1, maximum: 10 })),
 			}),
@@ -141,7 +186,8 @@ export function buildKnowledgeTools(kc: KnowledgeContext) {
 						return okResult<Details>({ status: "no_current_page", hint: "Could not identify the current page." });
 					}
 					const planner = new PathPlanner(store);
-					const best = resolveTarget(store, params.target);
+					const resolved = resolveNavigateTarget(store, params.target, fromPage, params.top_k_candidates ?? 3);
+					const best = resolved.best;
 					if (best === null) {
 						return okResult<Details>({
 							status: "unknown_target",
@@ -164,6 +210,7 @@ export function buildKnowledgeTools(kc: KnowledgeContext) {
 						from_page_name: fromRec?.canonicalName ?? null,
 						to_page_id: best,
 						to_page_name: toRec?.canonicalName ?? null,
+						candidates_considered: resolved.candidates,
 						...pathToDict(store, primary),
 					});
 				} catch (e) {

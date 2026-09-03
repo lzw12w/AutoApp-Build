@@ -16,7 +16,8 @@ import { InspectorClient } from "./client.ts";
 import { compactToolResultContent } from "./compact/payload.ts";
 import { elideOldViewHierarchies } from "./compact/elide.ts";
 import { extractiveGuiSummary, generateGuiCompactionSummary } from "./compact/summary.ts";
-import { applyConfigToEnv, defaultNotePath, loadConfig } from "./config.ts";
+import { applyConfigToEnv, defaultNotePath, loadConfig, syncInspectorEnv } from "./config.ts";
+import { resolveIntoConfig } from "./ios-runtime/device-registry.ts";
 import { ensureLocalInspectorTunnel } from "./ios-runtime/tunnel.ts";
 import { identityForAction, safeParams } from "./knowledge/attribution.ts";
 import { resolveBundleId } from "./knowledge/bundle.ts";
@@ -38,16 +39,14 @@ import { MUTATING_TOOL_NAMES } from "./tools/index.ts";
 import { buildTools } from "./tools/index.ts";
 import { buildKnowledgeTools, type KnowledgeContext } from "./tools/knowledge.ts";
 import { recordKnowledgeTool } from "./tools/note.ts";
+import { contentLooksFailed } from "./tools/result.ts";
 import { renderTodosReminder, TodoList, todoWriteTool } from "./tools/todo.ts";
 
 export default function (pi: ExtensionAPI): void {
 	const cfg = loadConfig();
 	applyConfigToEnv(cfg);
 
-	const host = cfg.inspectorHost;
-	const port = cfg.inspectorPort;
-	const udid = cfg.inspectorDevice;
-	const client = new InspectorClient({ host, port });
+	const client = new InspectorClient({ host: cfg.inspectorHost, port: cfg.inspectorPort });
 
 	// NOTE.md is snapshotted at load so mid-session record_knowledge writes
 	// do not mutate the live system prompt (same contract as the Python agent).
@@ -128,27 +127,38 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		if (cfg.anthropicBaseUrl) {
-			pi.registerProvider("anthropic", { baseUrl: cfg.anthropicBaseUrl });
-		}
-		if (cfg.openaiBaseUrl) {
-			pi.registerProvider("openai", { baseUrl: cfg.openaiBaseUrl });
-		}
+		// LLM provider/baseUrl/apiKey come entirely from pi's own config in
+		// Para's own agent home (~/.para/agent/models.json + auth.json). Para no
+		// longer injects a provider baseUrl, so it can't clobber a separate
+		// proxy's ANTHROPIC_*.
 		mode = parseModeOrDefault(pi.getFlag("para-mode"), cfg.mode);
 		lastUi = ctx.ui;
 		applyMode(mode, "session start", ctx.ui);
 		try {
+			if (cfg.autoTunnel) {
+				const deviceError = await resolveIntoConfig(cfg, { missingOk: !cfg.inspectorDevice.trim() });
+				if (deviceError) {
+					ctx.ui.notify(deviceError, "error");
+					return;
+				}
+				syncInspectorEnv(cfg);
+				client.retarget({ host: cfg.inspectorHost, port: cfg.inspectorPort });
+			}
 			const status = await ensureLocalInspectorTunnel({
-				host,
-				port,
-				identifier: udid,
+				host: cfg.inspectorHost,
+				port: cfg.inspectorPort,
+				identifier: cfg.inspectorDevice,
 				platform: cfg.inspectorPlatform,
 				remotePort: cfg.inspectorRemotePort,
 				requireHealthy: false,
 				start: cfg.autoTunnel,
 			});
 			const level = status.ok ? "info" : "warning";
-			ctx.ui.notify(`Para — inspector http://${host}:${port} (tunnel: ${status.action}, mode: ${mode})`, level);
+			const device = cfg.inspectorDevice ? ` device=${cfg.inspectorDevice}` : "";
+			ctx.ui.notify(
+				`Para — inspector http://${cfg.inspectorHost}:${cfg.inspectorPort}${device} (tunnel: ${status.action}, mode: ${mode})`,
+				level,
+			);
 		} catch (e) {
 			ctx.ui.notify(`Para iOS loaded — tunnel setup skipped: ${e instanceof Error ? e.message : String(e)}`, "warning");
 		}
@@ -243,9 +253,15 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_result", async (event) => {
-		if (!cfg.disableKnowledge && !event.isError && MUTATING_TOOL_NAMES.has(event.toolName)) {
+		if (!cfg.disableKnowledge && MUTATING_TOOL_NAMES.has(event.toolName)) {
 			try {
-				await snapshotNow(undefined, true);
+				const failed = event.isError || contentLooksFailed(event.content as { type: string; text?: string }[]);
+				if (failed) {
+					const obs = await ensureObserver();
+					obs.recordFailedTransition();
+				} else {
+					await snapshotNow(undefined, true);
+				}
 			} catch {
 				// best-effort; a snapshot failure must not fail the turn
 			}
@@ -261,6 +277,11 @@ export default function (pi: ExtensionAPI): void {
 			: async (view, vc) => {
 					const obs = await ensureObserver();
 					obs.observe(view, vc, { postAction: false });
+				},
+		onTapTarget: cfg.disableKnowledge
+			? undefined
+			: (kind, params, identity) => {
+					observer?.enrichLatestAction(kind, params, identity);
 				},
 	})) {
 		pi.registerTool(tool);

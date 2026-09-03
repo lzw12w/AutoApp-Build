@@ -43,3 +43,57 @@ export async function guard<T>(
 		return errResult<T>(e);
 	}
 }
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Hex address, whether Inspector returned a string or a nested view dict. */
+export function inspectorAddress(value: unknown): string | null {
+	if (typeof value === "string" && value) return value;
+	if (isRecord(value) && typeof value.address === "string" && value.address) return value.address;
+	return null;
+}
+
+/**
+ * Inspector mutating endpoints often 200 with `{success:false, error}` and a
+ * full view dump in `target`. Collapse that to a small dict the model can use,
+ * and raise so `guard` surfaces ok:false.
+ */
+export function compactInspectorAction(raw: unknown): Record<string, unknown> {
+	if (!isRecord(raw)) return { value: raw };
+	if (raw.success === false) {
+		throw new InspectorError(String(raw.error ?? "action failed"), "E_ACTION_FAILED", isRecord(raw) ? raw : {});
+	}
+	const target = raw.target ?? raw.address ?? raw.viewController ?? raw.scrollView;
+	const out: Record<string, unknown> = {};
+	for (const key of ["success", "timestamp", "animated", "method", "selectedIndex", "mode", "naturalTarget"]) {
+		if (raw[key] !== undefined) out[key] = raw[key];
+	}
+	const addr = inspectorAddress(target);
+	if (addr) out.address = addr;
+	if (isRecord(target)) {
+		if (typeof target.class === "string") out.class = target.class;
+		if (typeof target.title === "string" && target.title) out.title = target.title;
+	}
+	if (raw.gesture !== undefined) out.gesture = raw.gesture;
+	if (raw.error) out.error = raw.error;
+	return out;
+}
+
+/** True when a tool result is a structured Para `{ok:false}` JSON text block. */
+export function contentLooksFailed(content: { type: string; text?: string }[] | undefined): boolean {
+	if (!content) return false;
+	for (const block of content) {
+		if (block.type !== "text" || !block.text) continue;
+		const trimmed = block.text.trim();
+		if (!trimmed.startsWith("{")) continue;
+		try {
+			const parsed = JSON.parse(trimmed) as { ok?: unknown };
+			if (parsed && parsed.ok === false) return true;
+		} catch {
+			// not JSON
+		}
+	}
+	return false;
+}

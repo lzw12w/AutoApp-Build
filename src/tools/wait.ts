@@ -27,8 +27,8 @@ function waitCeilingMs(): number {
 	return Math.max(0, intEnv("INSPECTOR_WAIT_MAX_MS", DEFAULT_WAIT_MAX_MS));
 }
 
-function walkVcClasses(vc: VCNode): string[] {
-	return [...vc.walk()].map((n) => n.cls).filter(Boolean);
+function visibleVcClasses(vc: VCNode): string[] {
+	return vc.visiblePath().map((n) => n.cls).filter(Boolean);
 }
 
 async function commitInspect(
@@ -69,7 +69,7 @@ async function evaluateWait(
 
 	if (params.vcClass) {
 		vc = await client.vcHierarchy(signal);
-		const classes = walkVcClasses(vc);
+		const classes = visibleVcClasses(vc);
 		evidence.vc_classes = classes.slice(0, 8);
 		evidence.visible_vc = vcSummary(vc).visible_vc ?? { class: vc.visibleLeaf().cls };
 		const needle = params.vcClass.toLowerCase();
@@ -116,11 +116,12 @@ export function waitForTool(client: InspectorClient, hooks: InspectHooks = {}) {
 		description:
 			"Block until a condition holds, or until timeout. Use this to synchronize with an animation, " +
 			"network round-trip, or page transition — never sleep with arbitrary delays. " +
-			"Provide at least one of `vc_class` (substring on any VC in the stack), `text` (substring on a visible view), " +
+			"Provide at least one of `vc_class` (substring on the visible controller path — selected tab, " +
+			"not unselected siblings), `text` (substring on a visible view), " +
 			"or `accessibility_id` (exact). Multiple fields are AND. On timeout returns ok=false with the last evidence. " +
 			"Read-only: does not mutate the UI.",
 		parameters: Type.Object({
-			vc_class: Type.Optional(Type.String({ description: "Substring match against any ViewController class in the current stack." })),
+			vc_class: Type.Optional(Type.String({ description: "Substring match against the visible ViewController path (selected tab / presented modal)." })),
 			text: Type.Optional(Type.String({ description: "Substring match against visible view text." })),
 			accessibility_id: Type.Optional(Type.String({ description: "Exact accessibility identifier." })),
 			timeout_ms: Type.Optional(Type.Integer({ minimum: 0, default: 5000 })),

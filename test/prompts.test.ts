@@ -12,7 +12,7 @@ describe("prompts", () => {
 			expect(SYSTEM_PROMPT).toContain(tool);
 			expect(names.has(tool)).toBe(true);
 		}
-		expect(SYSTEM_PROMPT).toContain("tap");
+		expect(names.has("tap")).toBe(false);
 		expect(SYSTEM_PROMPT).not.toContain("vision_query");
 		expect(SYSTEM_PROMPT).not.toContain("skills_list");
 	});

@@ -142,6 +142,10 @@ export class InspectorClient {
 		return this.transport.baseUrl;
 	}
 
+	retarget(options: { host?: string; port?: number }): void {
+		this.transport.retarget(options);
+	}
+
 	// ---- health / state -------------------------------------------------
 
 	async ping(signal?: AbortSignal): Promise<Json> {
@@ -278,10 +282,10 @@ export class InspectorClient {
 		return items.filter(isRecord).map((it) => ViewNode.fromDict(it));
 	}
 
-	async screenshot(options: { quality?: number; signal?: AbortSignal } = {}): Promise<Json> {
+	async screenshot(options: { quality?: number; scale?: number; signal?: AbortSignal } = {}): Promise<Json> {
 		return asJson(
 			await this.transport.get("/api/screenshot", {
-				params: { quality: options.quality ?? 0.7 },
+				params: { quality: options.quality ?? 0.5, scale: options.scale ?? 0.5 },
 				signal: options.signal,
 			}),
 		);

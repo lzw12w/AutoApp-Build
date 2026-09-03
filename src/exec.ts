@@ -13,8 +13,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { InspectorClient } from "./client.ts";
-import { applyConfigToEnv, llmKeySet, type ParaConfig } from "./config.ts";
+import { applyConfigToEnv, llmKeySet, syncInspectorEnv, type ParaConfig } from "./config.ts";
 import { InspectorError } from "./errors.ts";
+import { resolveIntoConfig } from "./ios-runtime/device-registry.ts";
 import { ensureLocalInspectorTunnel } from "./ios-runtime/tunnel.ts";
 import { buildTools } from "./tools/index.ts";
 import { buildKnowledgeTools } from "./tools/knowledge.ts";
@@ -46,6 +47,12 @@ export interface DoctorResult {
 	};
 	llm: { provider: string; key_set: boolean; error: string | null };
 	tunnel: Record<string, unknown>;
+	device: {
+		id: string;
+		platform: string;
+		local_port: number;
+		remote_port: number;
+	} | null;
 }
 
 function preview(value: unknown, max = 160): string {
@@ -84,25 +91,13 @@ function lastAssistantError(messages: unknown[]): string | null {
 }
 
 /**
- * Prefer the Python-era Para gateway (config.toml llm_model + anthropic_base_url)
- * so exec does not fall through to pi's first catalog model (often official Claude).
+ * Select the model for `para exec` from pi's own catalog (which includes any
+ * providers defined in ~/.para/agent/models.json). Para no longer fabricates a
+ * model from its own baseUrl/apiKey — pi is the single source of LLM config —
+ * so we just match cfg.llmModel against the available models by id or name.
  */
 export function resolveExecModel(cfg: ParaConfig, available: readonly Model<string>[]): Model<string> | undefined {
 	const wanted = cfg.llmModel.trim();
-	if (wanted && cfg.anthropicBaseUrl) {
-		return {
-			id: wanted,
-			name: wanted,
-			api: "anthropic-messages",
-			provider: "anthropic",
-			baseUrl: cfg.anthropicBaseUrl.replace(/\/$/, ""),
-			reasoning: Boolean(cfg.anthropicThinkingBudget && cfg.anthropicThinkingBudget >= 1024),
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200000,
-			maxTokens: cfg.llmMaxTokens ?? 32768,
-		};
-	}
 	if (!wanted) return undefined;
 	const needle = wanted.toLowerCase();
 	return available.find((m) => m.id.toLowerCase() === needle || m.name.toLowerCase().includes(needle));
@@ -124,8 +119,44 @@ export function listParaTools(disableKnowledge = false): string[] {
 	return [...names, ...knowledge.map((t) => t.name)];
 }
 
+function doctorDevice(cfg: ParaConfig): DoctorResult["device"] {
+	if (!cfg.inspectorDevice.trim()) return null;
+	return {
+		id: cfg.inspectorDevice,
+		platform: cfg.inspectorPlatform,
+		local_port: cfg.inspectorPort,
+		remote_port: cfg.inspectorRemotePort ?? 8765,
+	};
+}
+
 export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
+	const keySet = llmKeySet(cfg);
+	const llm = {
+		provider: cfg.llmProvider,
+		key_set: keySet,
+		error: keySet ? null : "no LLM credential (configure ~/.para/agent/models.json or run `pi auth`)",
+	};
+
+	const deviceError = await resolveIntoConfig(cfg, { missingOk: !cfg.inspectorDevice.trim() });
+	if (deviceError) {
+		return {
+			ok: false,
+			code: "device_unavailable",
+			busy: false,
+			inspector: {
+				reachable: false,
+				base_url: `http://${cfg.inspectorHost}:${cfg.inspectorPort}`,
+				ping: null,
+				error: deviceError,
+			},
+			llm,
+			tunnel: { action: "none", detail: deviceError },
+			device: null,
+		};
+	}
+
 	applyConfigToEnv(cfg);
+	syncInspectorEnv(cfg);
 	const client = new InspectorClient({ host: cfg.inspectorHost, port: cfg.inspectorPort });
 	const tunnel = await ensureLocalInspectorTunnel({
 		host: cfg.inspectorHost,
@@ -154,13 +185,6 @@ export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
 		}
 	}
 
-	const keySet = llmKeySet(cfg);
-	const llm = {
-		provider: cfg.llmProvider,
-		key_set: keySet,
-		error: keySet ? null : "no API key (set ANTHROPIC_API_KEY / OPENAI_API_KEY or config.toml)",
-	};
-
 	let code = "ok";
 	if (!inspector.reachable) code = "device_unavailable";
 	else if (!keySet) code = "config_error";
@@ -172,6 +196,7 @@ export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
 		inspector,
 		llm,
 		tunnel: { ...tunnel },
+		device: doctorDevice(cfg),
 	};
 }
 

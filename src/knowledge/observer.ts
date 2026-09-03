@@ -7,7 +7,8 @@
  *
  * The pipeline: fingerprint → match against store → upsert page → if the page
  * changed and a recent action was recorded, record a transition attributed to
- * that action (content-blind via `__identity__`).
+ * that action (content-blind via `__identity__`; tap may later replace
+ * identity with a role-level handle).
  */
 import type { VCNode, ViewNode } from "../models.ts";
 import { computeFingerprint, type PageFingerprint } from "./fingerprint.ts";
@@ -32,6 +33,9 @@ class ActionLog {
 	popLatest(): ActionEvent | null {
 		return this.events.pop() ?? null;
 	}
+	peekLatest(): ActionEvent | null {
+		return this.events[this.events.length - 1] ?? null;
+	}
 	clear(): void {
 		this.events = [];
 	}
@@ -46,6 +50,7 @@ export interface ObserverStats {
 	transitionsRecorded: number;
 	unattributedStale: number;
 	unattributedNoAction: number;
+	failedTransitions: number;
 }
 
 export interface KnowledgeObserverOptions {
@@ -68,6 +73,7 @@ export class KnowledgeObserver {
 		transitionsRecorded: 0,
 		unattributedStale: 0,
 		unattributedNoAction: 0,
+		failedTransitions: 0,
 	};
 
 	constructor(store: KnowledgeStore, options: KnowledgeObserverOptions = {}) {
@@ -83,6 +89,18 @@ export class KnowledgeObserver {
 	/** Record a UI-mutating action just before it fires (for later attribution). */
 	recordAction(kind: string, params: Record<string, unknown> = {}, identity: Record<string, unknown> = {}): void {
 		this.actionLog.push({ kind, params, identity, issuedMs: Date.now() });
+	}
+
+	/**
+	 * Replace params/identity on the latest buffered action of `kind`.
+	 * Tap tools record kwargs first, then swap in a stable node summary once
+	 * the target is resolved — hex addresses must not survive into the edge.
+	 */
+	enrichLatestAction(kind: string, params: Record<string, unknown>, identity: Record<string, unknown> = {}): void {
+		const event = this.actionLog.peekLatest();
+		if (event === null || event.kind !== kind) return;
+		event.params = { ...params };
+		event.identity = { ...identity };
 	}
 
 	/**
@@ -151,6 +169,27 @@ export class KnowledgeObserver {
 
 		this.currentPageId = committedPageId;
 		this.currentFp = fp;
+	}
+
+	/**
+	 * Record a self-loop failure edge for the latest buffered action.
+	 * Planner `failurePenalty` only works if failed taps exist in the graph.
+	 */
+	recordFailedTransition(): void {
+		if (this.currentPageId === null) return;
+		const action = this.actionLog.popLatest();
+		if (action === null) return;
+		try {
+			this.store.recordTransition(this.currentPageId, this.currentPageId, {
+				actionType: action.kind,
+				actionParams: { ...action.params, __identity__: { ...action.identity } },
+				latencyMs: Math.max(0, Date.now() - action.issuedMs),
+				success: false,
+			});
+			this.stats.failedTransitions += 1;
+		} catch {
+			// best-effort
+		}
 	}
 
 	private isSameCommitted(fp: PageFingerprint): boolean {

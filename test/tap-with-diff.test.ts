@@ -162,6 +162,27 @@ describe("tap_with_diff", () => {
 		expect(t.taps).toBe(1);
 	});
 
+	test("view_search fallback excludes off-screen candidates from index addressing", async () => {
+		const t = new ScriptedTransport();
+		// Local tree has no match → forces the view_search fallback path.
+		t.views = [windowTree([{ class: "UIView", address: "0x1", frame: { x: 0, y: 0, width: 400, height: 800 } }])];
+		t.vcs = [vcTree("HomeVC")];
+		// One visible match + one off-screen reuse-pool match. Python filters to
+		// on_screen === true before ranking, so only ONE candidate exists and
+		// index=1 is out of range (rather than tapping the off-screen node).
+		t.search = [
+			{ class: "UIButton", address: "0xon", frame: { x: 10, y: 20, width: 100, height: 40 }, text: "Buy", onScreen: true },
+			{ class: "UIButton", address: "0xoff", frame: { x: 0, y: 900, width: 100, height: 40 }, text: "Buy", onScreen: false },
+		];
+		const result = await tool(t, "tap_with_diff").execute("cf", { text: "Buy", index: 1, stability: false }, undefined, undefined, ctx);
+		const payload = parse(result) as { ok: boolean; error?: { code: string } };
+		// Without the visibility filter this would tap the off-screen node at
+		// index 1; with it, index 1 is out of range.
+		expect(payload.ok).toBe(false);
+		expect(payload.error?.code).toBe("E_INDEX_OUT_OF_RANGE");
+		expect(t.taps).toBe(0);
+	});
+
 	test("class-only selector with many hits is E_AMBIGUOUS", async () => {
 		const t = new ScriptedTransport();
 		t.views = [
@@ -176,5 +197,41 @@ describe("tap_with_diff", () => {
 		expect(payload.ok).toBe(false);
 		expect(payload.error.code).toBe("E_AMBIGUOUS");
 		expect(t.taps).toBe(0);
+	});
+
+	test("reports a role-level tap target without the hex address", async () => {
+		const t = new ScriptedTransport();
+		t.views = [
+			windowTree([
+				{
+					class: "UIButton",
+					address: "0xb",
+					frame: { x: 10, y: 20, width: 100, height: 40 },
+					text: "Settings",
+					propertyName: "settingsButton",
+					accessibilityIdentifier: "btn_settings",
+				},
+			]),
+		];
+		t.vcs = [vcTree("HomeVC")];
+		let seen: { kind: string; params: Record<string, unknown>; identity: Record<string, unknown> } | null = null;
+		const found = buildTools(new InspectorClient(t), {
+			onTapTarget: (kind, params, identity) => {
+				seen = { kind, params, identity };
+			},
+		}).find((x) => x.name === "tap_with_diff");
+		if (!found) throw new Error("no tool tap_with_diff");
+		const result = await found.execute("c6", { address: "0xb", stability: false }, undefined, undefined, ctx);
+		expect(parse(result).ok).toBe(true);
+		expect(seen).not.toBeNull();
+		expect(seen!.kind).toBe("tap");
+		expect(seen!.identity).toEqual({
+			class: "UIButton",
+			property_name: "settingsButton",
+			aid: "btn_settings",
+			ancestor_chain: ["UIWindow"],
+		});
+		expect(JSON.stringify(seen!.params)).not.toContain("0xb");
+		expect(seen!.params.action_label).toContain("settingsButton");
 	});
 });

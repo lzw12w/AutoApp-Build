@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ViewNode } from "../src/models.ts";
-import { rankFindCandidates, tabIndexForTarget } from "../src/tools/find.ts";
+import { rankFindCandidates, resolveTapIntent, tabIndexForTarget } from "../src/tools/find.ts";
 
 function node(raw: Record<string, unknown>): ViewNode {
 	return ViewNode.fromDict(raw);
@@ -76,5 +76,62 @@ describe("tabIndexForTarget", () => {
 		const mine = [...tree.walk()].find((n) => n.accessibilityId === "mainTab.item.mine")!;
 		expect(tabIndexForTarget(tree, mine)).toBe(1);
 		expect(tabIndexForTarget(tree, tree)).toBeNull();
+	});
+});
+
+describe("resolveTapIntent", () => {
+	test("treats Luna-style filled optionals as absent", () => {
+		expect(
+			resolveTapIntent({
+				address: "0xABC",
+				x: 0,
+				y: 0,
+				text: "",
+				accessibility_id: "",
+				class: "",
+				property_name: "",
+			}),
+		).toEqual({ mode: "address", address: "0xABC", selector: {} });
+
+		expect(
+			resolveTapIntent({
+				address: "",
+				x: 0,
+				y: 0,
+				text: "",
+				accessibility_id: "playInfoBar.title",
+				class: "",
+			}),
+		).toEqual({
+			mode: "selector",
+			selector: { text: undefined, cls: undefined, accessibilityId: "playInfoBar.title", propertyName: undefined },
+		});
+
+		expect(
+			resolveTapIntent({
+				address: "0xABC",
+				x: 0,
+				y: 0,
+				accessibility_id: "playInfoBar.title",
+			}),
+		).toMatchObject({ mode: "selector", selector: { accessibilityId: "playInfoBar.title" } });
+
+		expect(resolveTapIntent({ address: "", x: 80, y: 730 })).toEqual({
+			mode: "point",
+			x: 80,
+			y: 730,
+			selector: {},
+		});
+
+		expect(resolveTapIntent({ address: "", x: 0, y: 0, text: "" })).toEqual({
+			mode: "none",
+			selector: {},
+		});
+
+		expect(resolveTapIntent({ address: "0xABC", class: "UILabel", x: 0, y: 0 })).toEqual({
+			mode: "address",
+			address: "0xABC",
+			selector: {},
+		});
 	});
 });

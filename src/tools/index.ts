@@ -24,6 +24,7 @@ import {
 	localFindCandidates,
 	preferVisible,
 	rankFindCandidates,
+	resolveTapIntent,
 	tabIndexForTarget,
 	type FindSelector,
 } from "./find.ts";
@@ -415,8 +416,17 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			}),
 			execute: (_id, params, signal) =>
 				guard<Details>(async () => {
-					let address = params.address as string | undefined;
-					if (!address && params.accessibility_id) {
+					const intent = resolveTapIntent(params);
+					if (intent.mode === "none") {
+						throw new InspectorError(
+							"long_press requires address, both x/y, or accessibility_id",
+							"E_INVALID_ARGUMENT",
+						);
+					}
+					let address = intent.address;
+					let x = intent.x;
+					let y = intent.y;
+					if (intent.mode === "selector") {
 						const tree = await client.viewHierarchy({
 							depth: FIND_TREE_DEPTH,
 							includeHidden: false,
@@ -426,11 +436,13 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 						const found = await resolveFinderTarget(
 							client,
 							tree,
-							{ accessibilityId: params.accessibility_id },
+							intent.selector,
 							undefined,
 							signal,
 						);
 						address = found.address;
+						x = undefined;
+						y = undefined;
 					}
 					let target: ViewNode | null = null;
 					if (address) {
@@ -442,14 +454,14 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 					}
 					const result = (await client.longPress({
 						address,
-						x: params.x,
-						y: params.y,
+						x,
+						y,
 						duration: params.duration,
 						signal,
 					})) as Record<string, unknown>;
 					reportTapTarget(hooks.onTapTarget, "long_press", target ? usableTapNode(target) : null, null, {
-						x: params.x,
-						y: params.y,
+						x,
+						y,
 					});
 					const interactionTarget = target ? interactionTargetSummary(target) : null;
 					const payload = compactInspectorAction(result);
@@ -580,22 +592,33 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			}),
 			execute: (_id, params, signal) =>
 				guard<Details>(async () => {
-					let address = params.address as string | undefined;
-					if (!address && params.accessibility_id) {
+					// `text` here is the typed string, not a finder selector.
+					const intent = resolveTapIntent({
+						address: params.address,
+						x: params.x,
+						y: params.y,
+						accessibility_id: params.accessibility_id,
+					});
+					let address = intent.address;
+					let x = intent.x;
+					let y = intent.y;
+					if (intent.mode === "selector") {
 						const tree = await client.viewHierarchy({
 							depth: FIND_TREE_DEPTH,
 							includeHidden: false,
 							onScreenOnly: true,
 							signal,
 						});
-						const target = await resolveFinderTarget(
+						const found = await resolveFinderTarget(
 							client,
 							tree,
-							{ accessibilityId: params.accessibility_id },
+							intent.selector,
 							undefined,
 							signal,
 						);
-						address = target.address;
+						address = found.address;
+						x = undefined;
+						y = undefined;
 					}
 					const target = address
 						? await client
@@ -609,8 +632,8 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 						clear: params.clear,
 						append: params.append,
 						address,
-						x: params.x,
-						y: params.y,
+						x,
+						y,
 						signal,
 					})) as Record<string, unknown>;
 					const payload = compactInspectorAction(result);

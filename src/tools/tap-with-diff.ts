@@ -15,8 +15,8 @@ import {
 	ambiguousFindAndTap,
 	applyVisibleOnly,
 	findNodeByAddress,
-	hasFindSelector,
 	localFindCandidates,
+	resolveTapIntent,
 	rankFindCandidates,
 	type FindSelector,
 } from "./find.ts";
@@ -195,6 +195,7 @@ export function tapWithDiffTool(client: InspectorClient, hooks: { onTapTarget?: 
 			"Tap a view AND verify the result in one tool call. Replaces the common " +
 			"screen_digest/view_hierarchy → tap → view_hierarchy triple when you need to see what changed. " +
 			"Provide either `address`, both `x`/`y`, or a finder selector (`text`, `accessibility_id`, `class`, `property_name`). " +
+			"When address or a selector is set, omit x/y — do not send x=0,y=0. " +
 			"Return shape is two-tier (read `post_check.kind` first): " +
 			"(1) if the tap navigated (push / present / tab switch), `post_check.kind=\"vc_diff\"` with from_vc → to_vc and " +
 			"NO `view_diff` — the after page is a different screen; call screen_digest yourself if you need to plan on it. " +
@@ -217,22 +218,17 @@ export function tapWithDiffTool(client: InspectorClient, hooks: { onTapTarget?: 
 		}),
 		execute: (_id, params, signal) =>
 			guard<Details>(async () => {
-				const sel: FindSelector = {
-					text: params.text,
-					cls: params.class,
-					accessibilityId: params.accessibility_id,
-					propertyName: params.property_name,
-				};
-				let address = params.address;
-				let x = params.x;
-				let y = params.y;
-				const hasPoint = x !== undefined && y !== undefined;
-				if (!address && !hasPoint && !hasFindSelector(sel)) {
+				const intent = resolveTapIntent(params);
+				if (intent.mode === "none") {
 					throw new InspectorError(
 						"tap_with_diff requires address, both x/y, or a finder selector",
 						"E_INVALID_ARGUMENT",
 					);
 				}
+				const sel: FindSelector = intent.selector;
+				let address = intent.address;
+				let x = intent.x;
+				let y = intent.y;
 
 				const depth = DIFF_DEPTH;
 				const includeHidden = false;
@@ -255,7 +251,7 @@ export function tapWithDiffTool(client: InspectorClient, hooks: { onTapTarget?: 
 					}
 				}
 
-				if (!address && hasFindSelector(sel)) {
+				if (intent.mode === "selector") {
 					target = await resolveFinderTarget(client, beforeView, sel, params.index, signal);
 					address = target.address;
 					x = undefined;
@@ -263,7 +259,7 @@ export function tapWithDiffTool(client: InspectorClient, hooks: { onTapTarget?: 
 				}
 
 				const result = await client.tap({ address, x, y, signal });
-				reportTapTarget(hooks.onTapTarget, "tap", target, beforeView, { x: params.x, y: params.y });
+				reportTapTarget(hooks.onTapTarget, "tap", target, beforeView, { x, y });
 
 				const vcProbe = await vcDiff(client, beforeVc, { settleMs, pollMs, signal });
 				let viewDiff: (ViewDiff & { polls: number; settled_after_ms: number; stable: boolean }) | null = null;

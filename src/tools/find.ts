@@ -16,6 +16,62 @@ export function hasFindSelector(sel: FindSelector): boolean {
 	return Boolean(sel.text || sel.cls || sel.accessibilityId || sel.propertyName);
 }
 
+function blank(value: unknown): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	const text = String(value).trim();
+	return text.length > 0 ? text : undefined;
+}
+
+export interface TapIntent {
+	mode: "selector" | "address" | "point" | "none";
+	address?: string;
+	x?: number;
+	y?: number;
+	selector: FindSelector;
+}
+
+/**
+ * Pick one tap mode. OpenAI-compatible models fill unused optional fields
+ * (`""`, `x=0`, `y=0`); those are treated as absent.
+ *
+ * Priority: strong selector (aid/text/property_name) > address >
+ * class-only selector > non-zero coordinates.
+ *
+ * Note: a strong selector overrides an address supplied in the same call —
+ * when both are present we re-resolve via the selector (aid/text are more
+ * stable than a possibly-stale hex address) rather than tapping the address.
+ */
+export function resolveTapIntent(params: {
+	address?: string;
+	x?: number;
+	y?: number;
+	text?: string;
+	class?: string;
+	cls?: string;
+	accessibility_id?: string;
+	accessibilityId?: string;
+	property_name?: string;
+	propertyName?: string;
+}): TapIntent {
+	const address = blank(params.address);
+	const selector: FindSelector = {
+		text: blank(params.text),
+		cls: blank(params.class ?? params.cls),
+		accessibilityId: blank(params.accessibility_id ?? params.accessibilityId),
+		propertyName: blank(params.property_name ?? params.propertyName),
+	};
+	const strong = Boolean(selector.text || selector.accessibilityId || selector.propertyName);
+	const hasPoint =
+		params.x !== undefined &&
+		params.y !== undefined &&
+		!(params.x === 0 && params.y === 0);
+	if (strong) return { mode: "selector", selector };
+	if (address) return { mode: "address", address, selector: {} };
+	if (selector.cls) return { mode: "selector", selector };
+	if (hasPoint) return { mode: "point", x: params.x, y: params.y, selector: {} };
+	return { mode: "none", selector: {} };
+}
+
 export function findNodeByAddress(root: ViewNode | null, address: string | undefined): ViewNode | null {
 	if (!root || !address) return null;
 	for (const node of root.walk()) {

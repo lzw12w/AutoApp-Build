@@ -10,6 +10,7 @@ class ScriptedTransport extends Transport {
 	viewI = 0;
 	vcI = 0;
 	taps = 0;
+	tapBodies: unknown[] = [];
 	tapResponse: unknown = { method: "public_api", address: "0xb", handledBy: "UIButton" };
 
 	constructor() {
@@ -31,9 +32,10 @@ class ScriptedTransport extends Transport {
 		return {};
 	}
 
-	override async post(path: string): Promise<unknown> {
+	override async post(path: string, options: { body?: Record<string, unknown> } = {}): Promise<unknown> {
 		if (path.includes("/tap")) {
 			this.taps += 1;
+			this.tapBodies.push(options.body ?? {});
 			return this.tapResponse;
 		}
 		return {};
@@ -233,5 +235,84 @@ describe("tap_with_diff", () => {
 		});
 		expect(JSON.stringify(seen!.params)).not.toContain("0xb");
 		expect(seen!.params.action_label).toContain("settingsButton");
+	});
+
+	test("drops x=0,y=0 when address is set", async () => {
+		const t = new ScriptedTransport();
+		t.views = [
+			windowTree([
+				{ class: "UIButton", address: "0xb", frame: { x: 10, y: 20, width: 100, height: 40 }, text: "Open" },
+			]),
+		];
+		t.vcs = [vcTree("HomeVC"), vcTree("DetailVC")];
+		const result = await tool(t, "tap_with_diff").execute(
+			"c7",
+			{
+				address: "0xb",
+				x: 0,
+				y: 0,
+				text: "",
+				accessibility_id: "",
+				class: "",
+				property_name: "",
+				index: 0,
+				stability: false,
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(parse(result).ok).toBe(true);
+		expect(t.tapBodies[0]).toEqual({ address: "0xb", compact: true });
+	});
+
+	test("aid plus zeros uses finder and does not send coordinates", async () => {
+		const t = new ScriptedTransport();
+		t.views = [
+			windowTree([
+				{
+					class: "UIButton",
+					address: "0xb",
+					frame: { x: 10, y: 20, width: 100, height: 40 },
+					text: "Title",
+					accessibilityIdentifier: "playInfoBar.title",
+				},
+			]),
+		];
+		t.vcs = [vcTree("HomeVC"), vcTree("DetailVC")];
+		const result = await tool(t, "tap_with_diff").execute(
+			"c8",
+			{
+				address: "",
+				x: 0,
+				y: 0,
+				text: "",
+				accessibility_id: "playInfoBar.title",
+				class: "",
+				property_name: "",
+				index: 0,
+				stability: false,
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(parse(result).ok).toBe(true);
+		expect(t.tapBodies[0]).toEqual({ address: "0xb", compact: true });
+	});
+
+	test("origin-only coordinates are rejected", async () => {
+		const t = new ScriptedTransport();
+		const result = await tool(t, "tap_with_diff").execute(
+			"c9",
+			{ address: "", x: 0, y: 0, text: "", accessibility_id: "" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		const payload = parse(result);
+		expect(payload.ok).toBe(false);
+		expect((payload.error as { code: string }).code).toBe("E_INVALID_ARGUMENT");
+		expect(t.taps).toBe(0);
 	});
 });

@@ -14,16 +14,16 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { InspectorClient } from "../client.ts";
+import { InspectorError } from "../errors.ts";
 import {
-	attemptCount,
 	avgLatencyMs,
 	type KnowledgeStore,
 	successRate,
 	type TransitionRecord,
 } from "../knowledge/store.ts";
-import { type PathResult, PathPlanner, pathHops } from "../knowledge/graph.ts";
+import { costTotal, type PathResult, PathPlanner, pathHops, type PlannedStep } from "../knowledge/graph.ts";
 import type { KnowledgeObserver } from "../knowledge/observer.ts";
-import { okResult } from "./result.ts";
+import { errResult, okResult } from "./result.ts";
 
 export interface KnowledgeContext {
 	client: InspectorClient;
@@ -37,16 +37,49 @@ export interface KnowledgeContext {
 
 type Details = { ok: boolean } & Record<string, unknown>;
 
-function stepToDict(store: KnowledgeStore, tr: TransitionRecord): Record<string, unknown> {
+const round3 = (x: number): number => Math.round(x * 1000) / 1000;
+const round1 = (x: number): number => Math.round(x * 10) / 10;
+
+/**
+ * Short human label for a transition. Mirrors Python
+ * `_transition_action_label`: prefer the recorded `action_label`, and when it
+ * is a Chinese "点击 「…」" tap label, strip the quoted target so distinct taps
+ * on the same control collapse to one label.
+ */
+function transitionActionLabel(tr: TransitionRecord): string {
+	const label = tr.actionParams.action_label;
+	if (typeof label === "string" && label.trim()) {
+		const l = label.trim();
+		if (l.startsWith("点击 ") && l.includes("「")) {
+			return l.split("「")[0]!.replace(/\s+$/, "");
+		}
+		return l;
+	}
+	return tr.actionType;
+}
+
+function stepToDict(store: KnowledgeStore, step: PlannedStep): Record<string, unknown> {
+	const tr = step.transition;
 	const toPage = store.getPage(tr.toPage, false);
 	return {
 		action_type: tr.actionType,
+		action_label: transitionActionLabel(tr),
 		action_params: tr.actionParams,
-		to_page_id: tr.toPage,
-		to_page_name: toPage?.canonicalName ?? null,
-		success_rate: Math.round(successRate(tr) * 1000) / 1000,
-		attempts: attemptCount(tr),
-		avg_latency_ms: Math.round(avgLatencyMs(tr) * 10) / 10,
+		expected_to_page_id: tr.toPage,
+		expected_to_page_name: toPage?.canonicalName ?? null,
+		expected_cost: round3(costTotal(step.cost)),
+		cost_breakdown: {
+			base: round3(step.cost.base),
+			latency: round3(step.cost.latency),
+			failure: round3(step.cost.failure),
+			evidence: round3(step.cost.evidence),
+			recency: round3(step.cost.recency),
+		},
+		evidence: {
+			success: tr.successCount,
+			failure: tr.failureCount,
+			avg_latency_ms: round1(avgLatencyMs(tr)),
+		},
 	};
 }
 
@@ -55,8 +88,8 @@ function pathToDict(store: KnowledgeStore, path: PathResult): Record<string, unk
 		from_page_id: path.fromPage,
 		to_page_id: path.toPage,
 		hops: pathHops(path),
-		total_cost: Math.round(path.totalCost * 1000) / 1000,
-		steps: path.steps.map((s) => stepToDict(store, s.transition)),
+		total_cost: round3(path.totalCost),
+		steps: path.steps.map((s) => stepToDict(store, s)),
 	};
 }
 
@@ -150,6 +183,7 @@ function summarizeEdges(store: KnowledgeStore, edges: TransitionRecord[], direct
 		const page = store.getPage(other, false);
 		return {
 			action_type: tr.actionType,
+			action_label: transitionActionLabel(tr),
 			action_params: tr.actionParams,
 			other_page_id: other,
 			other_page_name: page?.canonicalName ?? null,
@@ -169,13 +203,16 @@ export function buildKnowledgeTools(kc: KnowledgeContext) {
 			name: "navigate_to_page",
 			label: "Navigate to page",
 			description:
-				"Plan the cheapest known action path from the current page to a target. Target may be a page_id " +
-				"(starts with 'p_'), a ViewController class name, a canonical page name, or a substring of either " +
-				"(`Home` matches `UserHomePageViewController`). Returns the ordered steps " +
-				"(does NOT execute them — issue the taps yourself). Requires the graph to have learned a route.",
+				"Plan a multi-step path from the current page to a target page using the learned state graph. " +
+				"RETURNS A PLAN ONLY — does not execute. Each step includes action_type, params, expected_to_page_id, " +
+				"and a cost breakdown so you can decide whether to follow it. After executing a step, call " +
+				"view_hierarchy to verify the predicted target was reached, and replan if not. " +
+				"Target may be a page_id (starts with 'p_'), a ViewController class name, or a free-form page name " +
+				"(`Home` matches `UserHomePageViewController`). When using a non-page_id target, multiple candidates " +
+				"are returned in 'alternatives'.",
 			parameters: Type.Object({
 				target: Type.String({ description: "Target page_id, ViewController class, canonical name, or a substring of those." }),
-				max_steps: Type.Optional(Type.Integer({ default: 8, minimum: 1, maximum: 30 })),
+				max_steps: Type.Optional(Type.Integer({ default: 8, minimum: 1, maximum: 32 })),
 				top_k_candidates: Type.Optional(Type.Integer({ default: 3, minimum: 1, maximum: 10 })),
 			}),
 			async execute(_id, params, signal) {
@@ -183,24 +220,41 @@ export function buildKnowledgeTools(kc: KnowledgeContext) {
 					const { store, observer } = await kc.snapshotNow(signal);
 					const fromPage = observer.currentPage;
 					if (fromPage === null) {
-						return okResult<Details>({ status: "no_current_page", hint: "Could not identify the current page." });
+						return errResult(
+							new InspectorError(
+								"Observer has not committed a current page yet. Call view_hierarchy first (twice, due to debounce).",
+								"E_NO_CURRENT_PAGE",
+							),
+						);
 					}
 					const planner = new PathPlanner(store);
 					const resolved = resolveNavigateTarget(store, params.target, fromPage, params.top_k_candidates ?? 3);
 					const best = resolved.best;
 					if (best === null) {
-						return okResult<Details>({
-							status: "unknown_target",
-							message: `No page matches target ${JSON.stringify(params.target)}.`,
-							suggestions: nameSuggestions(store),
-						});
+						return errResult(
+							new InspectorError(`No page matches target ${JSON.stringify(params.target)}.`, "E_UNKNOWN_TARGET", {
+								suggestions: nameSuggestions(store),
+							}),
+						);
 					}
-					const primary = planner.findPath(fromPage, best, params.max_steps ?? 8);
+					const maxSteps = params.max_steps ?? 8;
+					const primary = planner.findPath(fromPage, best, maxSteps);
+					// Plan to best, also try alternatives for transparency.
+					const altPlans: Record<string, unknown>[] = [];
+					for (const c of resolved.candidates) {
+						if (c.page_id === best) continue;
+						const p = planner.findPath(fromPage, c.page_id, maxSteps);
+						if (p !== null) altPlans.push({ candidate: c, path: pathToDict(store, p) });
+					}
 					if (primary === null) {
-						return okResult<Details>({
-							status: "no_path",
-							message: `No path from ${fromPage} to ${best} within max_steps=${params.max_steps ?? 8}. The graph may need more exploration.`,
-						});
+						return errResult(
+							new InspectorError(
+								`No path from ${fromPage} to ${best} within max_steps=${maxSteps}. ` +
+									"The graph may need more exploration before this destination is reachable.",
+								"E_NO_PATH",
+								{ candidates_considered: resolved.candidates, alternatives: altPlans },
+							),
+						);
 					}
 					const fromRec = store.getPage(fromPage, false);
 					const toRec = store.getPage(best, false);
@@ -210,11 +264,14 @@ export function buildKnowledgeTools(kc: KnowledgeContext) {
 						from_page_name: fromRec?.canonicalName ?? null,
 						to_page_id: best,
 						to_page_name: toRec?.canonicalName ?? null,
+						hops: pathHops(primary),
+						total_cost: round3(primary.totalCost),
+						steps: primary.steps.map((s) => stepToDict(store, s)),
 						candidates_considered: resolved.candidates,
-						...pathToDict(store, primary),
+						alternatives: altPlans,
 					});
 				} catch (e) {
-					return okResult<Details>({ status: "error", message: e instanceof Error ? e.message : String(e) });
+					return errResult(e);
 				}
 			},
 		}),
@@ -235,9 +292,13 @@ export function buildKnowledgeTools(kc: KnowledgeContext) {
 				try {
 					const { store, observer } = await kc.snapshotNow(signal);
 					const pageId = observer.currentPage;
-					if (pageId === null) return okResult<Details>({ status: "no_current_page" });
+					if (pageId === null) {
+						return okResult<Details>({ status: "no_current_page", hint: "Call view_hierarchy first (twice, due to debounce)." });
+					}
 					const page = store.getPage(pageId, true);
-					if (page === null) return okResult<Details>({ status: "page_gone", page_id: pageId });
+					if (page === null) {
+						return errResult(new InspectorError(`Current page ${pageId} not found in store.`, "E_PAGE_GONE"));
+					}
 					const title = page.fingerprints.find((fp) => fp.title)?.title ?? null;
 					const limit = params.edge_limit ?? 8;
 					const result: Record<string, unknown> = {
@@ -257,7 +318,7 @@ export function buildKnowledgeTools(kc: KnowledgeContext) {
 					}
 					return okResult<Details>(result);
 				} catch (e) {
-					return okResult<Details>({ status: "error", message: e instanceof Error ? e.message : String(e) });
+					return errResult(e);
 				}
 			},
 		}),

@@ -10,7 +10,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { InspectorClient } from "../client.ts";
 import { Cancelled, InspectorError } from "../errors.ts";
-import { type VCNode, ViewNode } from "../models.ts";
+import { ViewNode } from "../models.ts";
 import {
 	ambiguousFindAndTap,
 	applyVisibleOnly,
@@ -20,63 +20,16 @@ import {
 	rankFindCandidates,
 	type FindSelector,
 } from "./find.ts";
-import { nodeSummary, vcSummary } from "./format.ts";
+import { nodeSummary } from "./format.ts";
 import { guard, okResult } from "./result.ts";
 import { pollIntervalMs, pollUntil, settleVcDiffMs } from "./poll.ts";
+import { vcDiff, vcSummaryNow } from "./post-check.ts";
 import { DIFF_MAX_ENTRIES, diffViewTrees, treeSignature, type ViewDiff } from "./view-diff.ts";
 import { reportTapTarget, type TapTargetHook } from "../knowledge/tap-target.ts";
 
 export const DIFF_DEPTH = 40;
 
 type Details = { ok: boolean } & Record<string, unknown>;
-
-function fingerprintVc(vc: VCNode | null): string {
-	if (!vc) return "";
-	return JSON.stringify(vcSummary(vc));
-}
-
-function topVcLabel(vc: VCNode | null): string {
-	if (!vc) return "unknown";
-	return vc.visibleLeaf().cls || "UnknownVC";
-}
-
-async function probeVcDiff(
-	client: InspectorClient,
-	before: VCNode | null,
-	opts: { settleMs: number; pollMs: number; signal?: AbortSignal },
-): Promise<Record<string, unknown>> {
-	const beforeFp = fingerprintVc(before);
-	try {
-		const { value: after, polls, elapsedMs } = await pollUntil(
-			() => client.vcHierarchy(opts.signal),
-			(vc) => fingerprintVc(vc) !== beforeFp,
-			opts,
-		);
-		const changed = fingerprintVc(after) !== beforeFp;
-		const fromLabel = topVcLabel(before);
-		const toLabel = topVcLabel(after);
-		return {
-			kind: "vc_diff",
-			ok: true,
-			changed,
-			summary: changed ? `VC changed: ${fromLabel} → ${toLabel}` : `VC unchanged (${toLabel})`,
-			from_vc: fromLabel,
-			to_vc: toLabel,
-			polls,
-			settled_after_ms: elapsedMs,
-		};
-	} catch (e) {
-		if (e instanceof Cancelled) throw e;
-		return {
-			kind: "vc_diff",
-			ok: false,
-			changed: false,
-			summary: `vc_diff probe failed: ${e instanceof Error ? e.message : String(e)}`,
-			polls: 0,
-			settled_after_ms: 0,
-		};
-	}
-}
 
 async function viewDiffAfterAction(
 	client: InspectorClient,
@@ -290,7 +243,7 @@ export function tapWithDiffTool(client: InspectorClient, hooks: { onTapTarget?: 
 
 				const [beforeView, beforeVc] = await Promise.all([
 					client.viewHierarchy({ depth, includeHidden, onScreenOnly, signal }),
-					client.vcHierarchy(signal).catch(() => null),
+					vcSummaryNow(client, signal),
 				]);
 
 				let target = findNodeByAddress(beforeView, address);
@@ -312,7 +265,7 @@ export function tapWithDiffTool(client: InspectorClient, hooks: { onTapTarget?: 
 				const result = await client.tap({ address, x, y, signal });
 				reportTapTarget(hooks.onTapTarget, "tap", target, beforeView, { x: params.x, y: params.y });
 
-				const vcProbe = await probeVcDiff(client, beforeVc, { settleMs, pollMs, signal });
+				const vcProbe = await vcDiff(client, beforeVc, { settleMs, pollMs, signal });
 				let viewDiff: (ViewDiff & { polls: number; settled_after_ms: number; stable: boolean }) | null = null;
 				let postCheck: Record<string, unknown>;
 				if (vcProbe.changed) {

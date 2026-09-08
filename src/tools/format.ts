@@ -3,7 +3,7 @@
  * `_vc_summary` helpers in ios_inspector_agent/actions/base.py — compact,
  * LLM-facing projections of ViewNode / VCNode.
  */
-import type { VCNode, ViewNode } from "../models.ts";
+import { Frame, type VCNode, type ViewNode } from "../models.ts";
 
 function halfUpRound(v: number): number {
 	return Math.floor(v + 0.5);
@@ -72,4 +72,41 @@ export function vcSummary(vc: VCNode, root = true): Record<string, unknown> {
 		}
 	}
 	return out;
+}
+
+/**
+ * Compact description of the view an interaction targeted, for post-action
+ * payloads. Ported from interact._interaction_target_summary. Uses the node's
+ * VISIBLE frame (not its layout frame) and returns null when that frame has no
+ * area — an off-screen / zero-size target isn't worth reporting.
+ */
+export function interactionTargetSummary(node: ViewNode): Record<string, unknown> | null {
+	const visibleFrame = Frame.fromAny(node.extra.visibleFrame ?? node.extra.visible_frame);
+	if (!(visibleFrame.width > 0 && visibleFrame.height > 0)) return null;
+	const summary: Record<string, unknown> = {
+		class: node.cls,
+		visibleFrame: {
+			x: visibleFrame.x,
+			y: visibleFrame.y,
+			width: visibleFrame.width,
+			height: visibleFrame.height,
+		},
+	};
+	if (node.accessibilityId) summary.accessibilityIdentifier = node.accessibilityId;
+	const sources: [string, string[]][] = [
+		["accessibilityLabel", ["accessibilityLabel", "accessibility_label"]],
+		["propertyName", ["propertyName", "property_name"]],
+		["placeholder", ["placeholder"]],
+		["viewController", ["viewController", "view_controller"]],
+	];
+	for (const [key, aliases] of sources) {
+		for (const alias of aliases) {
+			const value = node.extra[alias];
+			if (typeof value === "string" && value) {
+				summary[key] = value;
+				break;
+			}
+		}
+	}
+	return summary;
 }

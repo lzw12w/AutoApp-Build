@@ -27,8 +27,9 @@ import {
 	tabIndexForTarget,
 	type FindSelector,
 } from "./find.ts";
-import { nodeSummary, nodeToDict, vcSummary } from "./format.ts";
+import { interactionTargetSummary, nodeSummary, nodeToDict, vcSummary } from "./format.ts";
 import { compactInspectorAction, errResult, guard, okResult, textResult } from "./result.ts";
+import { skipped, textValue, vcDiff, vcSummaryNow } from "./post-check.ts";
 import { screenFrameForMotion, scrollDeltaToSwipePoints } from "./scroll-motion.ts";
 import { DIGEST_DEPTH, snapshotStable } from "./snapshot.ts";
 import { resolveFinderTarget, tapWithDiffTool } from "./tap-with-diff.ts";
@@ -335,21 +336,7 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			label: "Network log",
 			description: "Recent network requests captured by the inspector.",
 			parameters: Type.Object({ limit: Type.Optional(Type.Integer({ default: 20, maximum: 200 })) }),
-			execute: (_id, params, signal) =>
-				guard<Details>(async () => {
-					const raw = await client.networkLog(params.limit ?? 20, signal);
-					if (!raw || typeof raw !== "object" || !Array.isArray((raw as { items?: unknown }).items)) return raw;
-					const items = (raw as { items: unknown[] }).items.map((item) => {
-						if (!item || typeof item !== "object" || Array.isArray(item)) return item;
-						const rec = { ...(item as Record<string, unknown>) };
-						delete rec.responseHeaders;
-						delete rec.requestHeaders;
-						delete rec.response_headers;
-						delete rec.request_headers;
-						return rec;
-					});
-					return { ...raw, items };
-				}),
+			execute: (_id, params, signal) => guard<Details>(() => client.networkLog(params.limit ?? 20, signal)),
 		}),
 	);
 
@@ -448,20 +435,26 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 					let target: ViewNode | null = null;
 					if (address) {
 						try {
-							target = usableTapNode(ViewNode.fromDict(await client.viewInspect(address, signal)));
+							target = ViewNode.fromDict(await client.viewInspect(address, signal));
 						} catch {
 							target = null;
 						}
 					}
-					const result = await client.longPress({
+					const result = (await client.longPress({
 						address,
 						x: params.x,
 						y: params.y,
 						duration: params.duration,
 						signal,
+					})) as Record<string, unknown>;
+					reportTapTarget(hooks.onTapTarget, "long_press", target ? usableTapNode(target) : null, null, {
+						x: params.x,
+						y: params.y,
 					});
-					reportTapTarget(hooks.onTapTarget, "long_press", target, null, { x: params.x, y: params.y });
-					return compactInspectorAction(result);
+					const interactionTarget = target ? interactionTargetSummary(target) : null;
+					const payload = compactInspectorAction(result);
+					if (interactionTarget) payload.interaction_target = interactionTarget;
+					return payload;
 				}),
 		}),
 	);
@@ -522,7 +515,10 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 						duration,
 						signal,
 					})) as Record<string, unknown>;
-					return { ...compactInspectorAction(result), gesture: points, address: address ?? null };
+					const payload = compactInspectorAction(result);
+					payload.gesture = points;
+					payload.post_check = skipped("scroll motion has no fixed target");
+					return payload;
 				}),
 		}),
 	);
@@ -545,21 +541,22 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 				duration: Type.Optional(Type.Number({ default: 0.25 })),
 			}),
 			execute: (_id, params, signal) =>
-				guard<Details>(async () =>
-					compactInspectorAction(
-						await client.swipe({
-							address: params.address,
-							startX: params.start_x,
-							startY: params.start_y,
-							endX: params.end_x,
-							endY: params.end_y,
-							dx: params.dx,
-							dy: params.dy,
-							duration: params.duration,
-							signal,
-						}),
-					),
-				),
+				guard<Details>(async () => {
+					const result = (await client.swipe({
+						address: params.address,
+						startX: params.start_x,
+						startY: params.start_y,
+						endX: params.end_x,
+						endY: params.end_y,
+						dx: params.dx,
+						dy: params.dy,
+						duration: params.duration,
+						signal,
+					})) as Record<string, unknown>;
+					const payload = compactInspectorAction(result);
+					payload.post_check = skipped("swipe motion has no fixed target");
+					return payload;
+				}),
 		}),
 	);
 
@@ -600,18 +597,29 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 						);
 						address = target.address;
 					}
-					return compactInspectorAction(
-						await client.inputText({
-							text: params.text,
-							submit: params.submit,
-							clear: params.clear,
-							append: params.append,
-							address,
-							x: params.x,
-							y: params.y,
-							signal,
-						}),
-					);
+					const target = address
+						? await client
+								.viewInspect(address, signal)
+								.then((raw) => ViewNode.fromDict(raw))
+								.catch(() => null)
+						: null;
+					const result = (await client.inputText({
+						text: params.text,
+						submit: params.submit,
+						clear: params.clear,
+						append: params.append,
+						address,
+						x: params.x,
+						y: params.y,
+						signal,
+					})) as Record<string, unknown>;
+					const payload = compactInspectorAction(result);
+					payload.post_check = address
+						? await textValue(client, address, { signal })
+						: skipped("input_text without address");
+					const interactionTarget = target ? interactionTargetSummary(target) : null;
+					if (interactionTarget) payload.interaction_target = interactionTarget;
+					return payload;
 				}),
 		}),
 	);
@@ -626,6 +634,7 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			parameters: Type.Object({ animated: Type.Optional(Type.Boolean({ default: true })) }),
 			execute: (_id, params, signal) =>
 				guard<Details>(async () => {
+					const beforeVc = await vcSummaryNow(client, signal);
 					const compacted = compactInspectorAction(await client.dismiss(params.animated ?? true, signal));
 					if (compacted.mode === "endEditing") {
 						throw new InspectorError(
@@ -634,6 +643,7 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 							compacted,
 						);
 					}
+					compacted.post_check = await vcDiff(client, beforeVc, { signal });
 					return compacted;
 				}),
 		}),
@@ -646,7 +656,12 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 			description: "Pop the top view controller off the navigation stack (system back). **Mutating**.",
 			parameters: Type.Object({ animated: Type.Optional(Type.Boolean({ default: true })) }),
 			execute: (_id, params, signal) =>
-				guard<Details>(async () => compactInspectorAction(await client.back(params.animated ?? true, signal))),
+				guard<Details>(async () => {
+					const beforeVc = await vcSummaryNow(client, signal);
+					const payload = compactInspectorAction(await client.back(params.animated ?? true, signal));
+					payload.post_check = await vcDiff(client, beforeVc, { signal });
+					return payload;
+				}),
 		}),
 	);
 
@@ -692,7 +707,10 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 					if (index === undefined && !title) {
 						throw new InspectorError("provide index, title, or accessibility_id", "E_INVALID_ARGUMENT");
 					}
-					return compactInspectorAction(await client.switchTab({ index, title, signal }));
+					const beforeVc = await vcSummaryNow(client, signal);
+					const payload = compactInspectorAction(await client.switchTab({ index, title, signal }));
+					payload.post_check = await vcDiff(client, beforeVc, { signal });
+					return payload;
 				}),
 		}),
 	);
@@ -707,7 +725,23 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 				animated: Type.Optional(Type.Boolean({ default: true })),
 			}),
 			execute: (_id, params, signal) =>
-				guard<Details>(async () => compactInspectorAction(await client.openUrl(params.url, params.animated ?? true, signal))),
+				guard<Details>(async () => {
+					// Soft guardrail: WARN (do not block) on destructive-looking routes.
+					const lower = params.url.toLowerCase();
+					let warning: string | null = null;
+					for (const bad of ["wipe", "clear_cache", "logout", "delete_account", "internal_debug", "hard_reset"]) {
+						if (lower.includes(bad)) {
+							warning = `route contains sensitive keyword '${bad}'`;
+							break;
+						}
+					}
+					const beforeVc = await vcSummaryNow(client, signal);
+					const result = await client.openUrl(params.url, params.animated ?? true, signal);
+					const postCheck = await vcDiff(client, beforeVc, { signal });
+					const payload: Record<string, unknown> = { opened: params.url, result, post_check: postCheck };
+					if (warning) payload.warning = warning;
+					return payload;
+				}),
 		}),
 	);
 
@@ -744,7 +778,13 @@ export function buildTools(client: InspectorClient, hooks: InspectHooks = {}) {
 					if (validIds.length === 0) {
 						throw new InspectorError(`No valid numeric story IDs found in: ${params.story_ids}`, "E_INVALID_ARGS");
 					}
-					return client.appointFeedStories({ storyIds: validIds, signal });
+					const result = await client.appointFeedStories({ storyIds: validIds, signal });
+					return {
+						appointed_stories: validIds,
+						count: validIds.length,
+						result,
+						message: `appointed ${validIds.length} story(ies) to Feed; effective immediately`,
+					};
 				}),
 		}),
 	);

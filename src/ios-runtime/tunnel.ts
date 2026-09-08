@@ -18,6 +18,17 @@ import { join } from "node:path";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const INSPECTOR_REMOTE_DEFAULT = 8765;
 
+/**
+ * How long to wait for a freshly-spawned iproxy to become usable. iproxy needs
+ * a beat to open the USB channel to the device before the on-device inspector
+ * answers — on some devices ~1.5–2s. Waiting too little makes the very first
+ * `para` after plugging in falsely report "USB backend may be dead". Health
+ * (`/api/ping`) is the strict gate; the TCP-open gate is only used when a
+ * caller does not require health (it opens sooner).
+ */
+const IOS_TUNNEL_HEALTHY_DEADLINE_MS = 5000;
+const IOS_TUNNEL_PORTOPEN_DEADLINE_MS = 3000;
+
 export type TunnelPlatform = "ios" | "android";
 
 export interface TunnelStatus {
@@ -465,8 +476,11 @@ async function startIosTunnel(
 		exited = true;
 	});
 
-	const deadline = Date.now() + (requireHealthy ? 1500 : 800);
-	while (Date.now() < deadline) {
+	const budget = requireHealthy ? IOS_TUNNEL_HEALTHY_DEADLINE_MS : IOS_TUNNEL_PORTOPEN_DEADLINE_MS;
+	// Under test hooks the readiness probes are mocked and deterministic, so
+	// polling adds nothing but wall-clock — one shot, no sleeping.
+	const deadline = Date.now() + (testHooks ? 0 : budget);
+	for (;;) {
 		if (exited) {
 			return { ok: false, action: "failed", detail: `USB tunnel exited immediately (pid=${child.pid})`, pid: child.pid };
 		}
@@ -477,6 +491,7 @@ async function startIosTunnel(
 		} else if (await portIsOpen("127.0.0.1", localPort)) {
 			return { ok: true, action: "started", detail: `started USB tunnel on 127.0.0.1:${localPort}`, pid: child.pid };
 		}
+		if (Date.now() >= deadline) break;
 		await sleep(50);
 	}
 	if (!requireHealthy && !exited) {

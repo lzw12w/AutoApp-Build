@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { applyAgentDir, applyConfigToEnv, loadConfig, parseFlatToml, syncInspectorEnv } from "../src/config.ts";
-import { defaultSessionDir, resolveExecModel } from "../src/exec.ts";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	defaultSessionDir,
+	findRecentSessionFileForTest,
+	findSessionFileForTest,
+	resolveExecModel,
+} from "../src/exec.ts";
 
 describe("parseFlatToml", () => {
 	test("reads strings, numbers, bools, strips comments", () => {
@@ -183,5 +191,34 @@ describe("defaultSessionDir", () => {
 
 	test("flattens separators and colons", () => {
 		expect(defaultSessionDir("/a", "/x/y")).toBe("/a/sessions/--x-y--");
+	});
+});
+
+describe("session file discovery", () => {
+	// --session-id needs to find a session whose filename it does not know:
+	// pi names files <timestamp>_<id>.jsonl, so the id alone is not a path.
+	test("matches a session by its id suffix, not by exact filename", () => {
+		const dir = mkdtempSync(join(tmpdir(), "para-sess-"));
+		writeFileSync(join(dir, "2026-01-01T00-00-00-000Z_wanted.jsonl"), "{}\n");
+		writeFileSync(join(dir, "2026-01-01T00-00-00-000Z_other.jsonl"), "{}\n");
+		expect(findSessionFileForTest(dir, "wanted")).toBe(
+			join(dir, "2026-01-01T00-00-00-000Z_wanted.jsonl"),
+		);
+		expect(findSessionFileForTest(dir, "absent")).toBeUndefined();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("--continue picks the newest file, and tolerates a missing dir", () => {
+		const dir = mkdtempSync(join(tmpdir(), "para-sess-"));
+		const older = join(dir, "2026-01-01T00-00-00-000Z_a.jsonl");
+		const newer = join(dir, "2026-01-02T00-00-00-000Z_b.jsonl");
+		writeFileSync(older, "{}\n");
+		writeFileSync(newer, "{}\n");
+		// Order by mtime, not by name — a caller-chosen id can sort anywhere.
+		utimesSync(older, new Date(1000), new Date(1000));
+		utimesSync(newer, new Date(2000), new Date(2000));
+		expect(findRecentSessionFileForTest(dir)).toBe(newer);
+		expect(findRecentSessionFileForTest(join(dir, "nope"))).toBeUndefined();
+		rmSync(dir, { recursive: true, force: true });
 	});
 });

@@ -3,7 +3,7 @@
  *
  * Stdout of `para exec` is a single JSON object (Python host_api.ExecResult).
  */
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,6 +17,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { InspectorClient } from "./client.ts";
 import { applyConfigToEnv, llmKeySet, syncInspectorEnv, type ParaConfig } from "./config.ts";
 import { InspectorError } from "./errors.ts";
+import { listDevices } from "./ios-runtime/device-broker.ts";
 import { resolveIntoConfig } from "./ios-runtime/device-registry.ts";
 import { buildTools } from "./tools/index.ts";
 import { buildKnowledgeTools } from "./tools/knowledge.ts";
@@ -30,6 +31,16 @@ export interface ExecResult {
 	code: string;
 	reply: string;
 	session_id: string | null;
+	/**
+	 * Set only when this call attached to a session that already had history.
+	 * A caller that expected a fresh session can tell it inherited someone
+	 * else's context — session ids are caller-chosen, so two scripts picking
+	 * the same string would otherwise silently share a conversation.
+	 */
+	session_resumed?: {
+		created: string;
+		turns: number;
+	};
 	steps: Array<Record<string, unknown>>;
 	step_count: number;
 	busy: boolean;
@@ -53,6 +64,20 @@ export interface DoctorResult {
 		platform: string;
 		remote_port: number;
 	} | null;
+	/**
+	 * Every device currently attached, not just the selected one. A caller
+	 * facing "device required with multiple devices" needs the ids to choose
+	 * from, and `ready: false` entries explain a device that is plugged in but
+	 * unpaired / unauthorized — otherwise indistinguishable from absent.
+	 */
+	devices: Array<{
+		id: string;
+		platform: string;
+		connection: string;
+		model?: string;
+		ready: boolean;
+		selected: boolean;
+	}>;
 }
 
 function preview(value: unknown, max = 160): string {
@@ -176,6 +201,27 @@ function doctorDevice(cfg: ParaConfig): DoctorResult["device"] {
 	};
 }
 
+/**
+ * Attached devices, annotated with which one this config resolves to.
+ * Never throws: doctor's job is to report trouble, so a failing enumeration
+ * degrades to an empty list rather than replacing the whole diagnosis.
+ */
+async function enumerateDevices(selectedId: string): Promise<DoctorResult["devices"]> {
+	try {
+		const found = await listDevices();
+		return found.map((d) => ({
+			id: d.id,
+			platform: d.platform,
+			connection: d.connection,
+			...(d.model ? { model: d.model } : {}),
+			ready: d.ready,
+			selected: Boolean(selectedId) && d.id === selectedId,
+		}));
+	} catch {
+		return [];
+	}
+}
+
 export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
 	const keySet = llmKeySet(cfg);
 	const llm = {
@@ -199,6 +245,7 @@ export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
 			llm,
 			tunnel: { action: "none", detail: deviceError },
 			device: null,
+			devices: await enumerateDevices(cfg.inspectorDevice.trim()),
 		};
 	}
 
@@ -247,6 +294,7 @@ export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
 		llm,
 		tunnel: { ...tunnel },
 		device: doctorDevice(cfg),
+		devices: await enumerateDevices(cfg.inspectorDevice.trim()),
 	};
 }
 
@@ -257,6 +305,12 @@ export interface ExecOptions {
 	 * in-memory session that leaves nothing behind.
 	 */
 	sessionId?: string;
+	/**
+	 * Attach to the most recent session in this cwd, creating one if none
+	 * exists. Saves the caller from inventing and threading an id. Ignored
+	 * when sessionId is given, since that names a session outright.
+	 */
+	continueRecent?: boolean;
 }
 
 /**
@@ -274,12 +328,40 @@ export function defaultSessionDir(agentDir: string, cwd: string): string {
 }
 
 /**
+ * Newest session file in a directory, or undefined when there is none.
+ *
+ * pi has its own findMostRecentSession but does not export it from the package
+ * root. Mirrored here: newest mtime wins. pi additionally filters by the cwd
+ * recorded in each header, which is redundant for us — defaultSessionDir()
+ * already scopes the directory to one cwd.
+ */
+export function findRecentSessionFileForTest(dir: string): string | undefined {
+	return findRecentSessionFile(dir);
+}
+
+function findRecentSessionFile(dir: string): string | undefined {
+	if (!existsSync(dir)) return undefined;
+	let best: { path: string; mtime: number } | undefined;
+	for (const name of readdirSync(dir)) {
+		if (!name.endsWith(".jsonl")) continue;
+		const path = join(dir, name);
+		const mtime = statSync(path).mtimeMs;
+		if (!best || mtime > best.mtime) best = { path, mtime };
+	}
+	return best?.path;
+}
+
+/**
  * Locate a persisted session by id.
  *
  * Files are named `<timestamp>_<sessionId>.jsonl`, so the id alone does not
  * give the path — the directory has to be scanned. Returns undefined when the
  * session does not exist yet, which is the normal first-call case.
  */
+export function findSessionFileForTest(dir: string, sessionId: string): string | undefined {
+	return findSessionFile(dir, sessionId);
+}
+
 function findSessionFile(dir: string, sessionId: string): string | undefined {
 	if (!existsSync(dir)) return undefined;
 	const suffix = `_${sessionId}.jsonl`;
@@ -405,19 +487,39 @@ export async function runExec(
 				? "medium"
 				: undefined;
 
-	// Without --session-id, stay in memory: exec is a one-shot by default and
-	// should not litter ~/.para/agent/sessions with a file per invocation.
-	// With one, reopen the file if it exists so history carries over, else
-	// create it under that exact id so the next call can find it.
+	// Without --session-id or --continue, stay in memory: exec is a one-shot by
+	// default and should not litter ~/.para/agent/sessions with a file per
+	// invocation. With either, resolve to a file on disk so history carries over.
 	let sessionManager: SessionManager;
-	if (!options.sessionId) {
+	let resumed: ExecResult["session_resumed"];
+	if (!options.sessionId && !options.continueRecent) {
 		sessionManager = SessionManager.inMemory(cwd);
 	} else {
 		const sessionDir = defaultSessionDir(agentDir, cwd);
-		const existing = findSessionFile(sessionDir, options.sessionId);
-		sessionManager = existing
-			? SessionManager.open(existing, sessionDir, cwd)
-			: SessionManager.create(cwd, sessionDir, { id: options.sessionId });
+		const existing = options.sessionId
+			? findSessionFile(sessionDir, options.sessionId)
+			: findRecentSessionFile(sessionDir);
+		if (existing) {
+			sessionManager = SessionManager.open(existing, sessionDir, cwd);
+			// Report what we attached to. Ids are caller-chosen, so inheriting a
+			// stranger's history is a real possibility; turns=0 would mean the
+			// file exists but is empty, which is not worth flagging.
+			const turns = sessionManager
+				.getEntries()
+				.filter((e) => (e as { message?: { role?: string } }).message?.role === "user").length;
+			if (turns > 0) {
+				resumed = {
+					created: sessionManager.getHeader()?.timestamp ?? "unknown",
+					turns,
+				};
+			}
+		} else {
+			sessionManager = SessionManager.create(
+				cwd,
+				sessionDir,
+				options.sessionId ? { id: options.sessionId } : undefined,
+			);
+		}
 	}
 
 	const { session } = await createAgentSession({
@@ -459,6 +561,8 @@ export async function runExec(
 				code: "error",
 				reply,
 				session_id: session.sessionId,
+			...(resumed ? { session_resumed: resumed } : {}),
+				...(resumed ? { session_resumed: resumed } : {}),
 				steps,
 				step_count: steps.length,
 				busy: false,
@@ -470,6 +574,7 @@ export async function runExec(
 			code: "ok",
 			reply,
 			session_id: session.sessionId,
+			...(resumed ? { session_resumed: resumed } : {}),
 			steps,
 			step_count: steps.length,
 			busy: false,

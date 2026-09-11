@@ -31,7 +31,7 @@ function printHelp(): void {
 	process.stdout.write(`Para — drive a live iOS/Android app with natural language
 
 Usage:
-  para exec -m "<prompt>" [--session-id <id>]   One turn; JSON on stdout
+  para exec -m "<prompt>" [--session-id <id> | -c]   One turn; JSON on stdout
   para serve [--serve-host H] [--serve-port P]  Web UI, default 127.0.0.1:7777
   para doctor [--json]       Inspector + API-key probe
   para models [--all]        Which models llm_model can name right now
@@ -151,14 +151,27 @@ function formatDoctorText(d: Awaited<ReturnType<typeof probeDoctor>>): string {
 	const device = d.device
 		? `${d.device.platform} ${d.device.id} → port ${d.device.remote_port} (direct, no port forward)`
 		: "unspecified";
-	return [
+	const lines = [
 		`inspector  ${d.inspector.base_url}  ${ping}`,
 		`device     ${device}`,
 		`llm        provider=${d.llm.provider}  ${llm}`,
 		`transport  ${d.tunnel.action ?? "?"}  ${d.tunnel.detail ?? ""}`,
 		`result     ${d.ok ? "ok" : d.code}`,
-		"",
-	].join("\n");
+	];
+	// List every attachment only when the selected one is not the whole story:
+	// several plugged in, or one that is present but unusable. With a single
+	// ready device the `device` line above already said it.
+	const worthListing = d.devices.length > 1 || d.devices.some((x) => !x.ready);
+	if (worthListing) {
+		lines.push("", "attached");
+		for (const x of d.devices) {
+			const mark = x.selected ? "*" : " ";
+			const state = x.ready ? "" : `  NOT READY (${x.connection})`;
+			lines.push(`  ${mark} ${x.platform.padEnd(7)} ${x.id}${x.model ? `  ${x.model}` : ""}${state}`);
+		}
+	}
+	lines.push("");
+	return lines.join("\n");
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -231,10 +244,14 @@ async function main(argv: string[]): Promise<number> {
 		const sliced = argv.slice(1);
 		const msg = takeFlag(sliced, ["-m", "--message", "--prompt"]);
 		const sid = takeFlag(msg.rest, ["--session-id", "--session"]);
-		const { cfg } = withCliOverrides(sid.rest.filter((a) => a !== "--json"));
+		const cont = sid.rest.includes("--continue") || sid.rest.includes("-c");
+		const { cfg } = withCliOverrides(
+			sid.rest.filter((a) => a !== "--json" && a !== "--continue" && a !== "-c"),
+		);
 		const sessionId = sid.value?.trim();
 		const result = await runExec(cfg, msg.value ?? "", {
 			...(sessionId ? { sessionId } : {}),
+			...(cont ? { continueRecent: true } : {}),
 		});
 		process.stdout.write(`${JSON.stringify(result)}\n`);
 		return execExitCode(result);

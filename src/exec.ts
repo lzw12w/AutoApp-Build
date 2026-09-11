@@ -3,6 +3,8 @@
  *
  * Stdout of `para exec` is a single JSON object (Python host_api.ExecResult).
  */
+import { existsSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	createAgentSession,
@@ -248,7 +250,50 @@ export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
 	};
 }
 
-export async function runExec(cfg: ParaConfig, message: string): Promise<ExecResult> {
+export interface ExecOptions {
+	/**
+	 * Reuse a session on disk so successive `exec` calls share history.
+	 * Created on first use, appended to afterwards. Omit for a one-shot,
+	 * in-memory session that leaves nothing behind.
+	 */
+	sessionId?: string;
+}
+
+/**
+ * Where pi keeps sessions for a given cwd: `<agentDir>/sessions/--<cwd>--`,
+ * with separators flattened to `-`.
+ *
+ * pi computes this internally but does not export the helper, so the scheme is
+ * mirrored here. It is verified against a real session directory in the tests —
+ * if pi ever changes the encoding, that test fails rather than exec silently
+ * writing sessions somewhere nothing will look for them.
+ */
+export function defaultSessionDir(agentDir: string, cwd: string): string {
+	const safe = `--${resolve(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	return join(agentDir, "sessions", safe);
+}
+
+/**
+ * Locate a persisted session by id.
+ *
+ * Files are named `<timestamp>_<sessionId>.jsonl`, so the id alone does not
+ * give the path — the directory has to be scanned. Returns undefined when the
+ * session does not exist yet, which is the normal first-call case.
+ */
+function findSessionFile(dir: string, sessionId: string): string | undefined {
+	if (!existsSync(dir)) return undefined;
+	const suffix = `_${sessionId}.jsonl`;
+	for (const name of readdirSync(dir)) {
+		if (name.endsWith(suffix)) return join(dir, name);
+	}
+	return undefined;
+}
+
+export async function runExec(
+	cfg: ParaConfig,
+	message: string,
+	options: ExecOptions = {},
+): Promise<ExecResult> {
 	applyConfigToEnv(cfg);
 	const trimmed = message.trim();
 	if (!trimmed) {
@@ -360,10 +405,25 @@ export async function runExec(cfg: ParaConfig, message: string): Promise<ExecRes
 				? "medium"
 				: undefined;
 
+	// Without --session-id, stay in memory: exec is a one-shot by default and
+	// should not litter ~/.para/agent/sessions with a file per invocation.
+	// With one, reopen the file if it exists so history carries over, else
+	// create it under that exact id so the next call can find it.
+	let sessionManager: SessionManager;
+	if (!options.sessionId) {
+		sessionManager = SessionManager.inMemory(cwd);
+	} else {
+		const sessionDir = defaultSessionDir(agentDir, cwd);
+		const existing = findSessionFile(sessionDir, options.sessionId);
+		sessionManager = existing
+			? SessionManager.open(existing, sessionDir, cwd)
+			: SessionManager.create(cwd, sessionDir, { id: options.sessionId });
+	}
+
 	const { session } = await createAgentSession({
 		cwd,
 		resourceLoader,
-		sessionManager: SessionManager.inMemory(cwd),
+		sessionManager,
 		modelRuntime,
 		noTools: "builtin",
 		...(model ? { model } : {}),

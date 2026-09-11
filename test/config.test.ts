@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { applyAgentDir, applyConfigToEnv, loadConfig, parseFlatToml, syncInspectorEnv } from "../src/config.ts";
-import { resolveExecModel } from "../src/exec.ts";
+import { defaultSessionDir, resolveExecModel } from "../src/exec.ts";
 
 describe("parseFlatToml", () => {
 	test("reads strings, numbers, bools, strips comments", () => {
@@ -167,5 +167,21 @@ describe("resolveExecModel", () => {
 			available,
 		);
 		expect(model?.id).toBe("model_api/experimental_0630");
+	});
+});
+
+describe("defaultSessionDir", () => {
+	// exec mirrors pi's cwd-encoding scheme because pi does not export the
+	// helper. If pi ever changes it, sessions would be written where nothing
+	// looks for them and --session-id would silently start a fresh session
+	// every call. Pin it against a directory pi itself created.
+	test("matches the layout pi actually uses", () => {
+		expect(defaultSessionDir("/home/u/.para/agent", "/Users/bytedance/para-v2/para-ios")).toBe(
+			"/home/u/.para/agent/sessions/--Users-bytedance-para-v2-para-ios--",
+		);
+	});
+
+	test("flattens separators and colons", () => {
+		expect(defaultSessionDir("/a", "/x/y")).toBe("/a/sessions/--x-y--");
 	});
 });

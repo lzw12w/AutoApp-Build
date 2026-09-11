@@ -33,6 +33,27 @@ npm i -g @bytedance-dev/para@latest   # 之后不用再带 --registry
 
 不建议 `npm config set registry`：那会把所有项目的 npm 流量都改道。
 
+## 多轮对话
+
+`para exec` 默认一次一问、无记忆。要让连续几次调用共享上下文，给同一个 `--session-id`：
+
+```bash
+para exec -m "打开搜索页" --session-id login-debug
+para exec -m "刚才那个页面，输入'测试'并搜索" --session-id login-debug
+para exec -m "结果列表有几条？" --session-id login-debug
+```
+
+id 由你自己起（任意字符串）。首次调用创建会话，之后追加，历史存在
+`~/.para/agent/sessions/`。不传 `--session-id` 时留在内存里，跑完即弃、不落文件。
+
+交互模式则天然连续，并支持挑选历史会话：
+
+```bash
+para                  # 进 TUI
+para --continue       # 接着上次
+para --resume         # 列出历史会话选一个
+```
+
 ## 从源码跑
 
 需要：[Bun](https://bun.sh)、真机 USB（iOS：macOS 自带的 usbmuxd，无需额外安装；Android：`adb`）、目标 App 以 Debug 打开 Inspector HTTP（默认 `:8765`）、以及 LLM 密钥。

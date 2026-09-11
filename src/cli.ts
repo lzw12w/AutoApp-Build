@@ -10,6 +10,21 @@
  */
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
+
+// Node prints "ExperimentalWarning: SQLite is an experimental feature" the
+// moment the knowledge store requires node:sqlite. It goes to stderr, but a
+// caller doing `para call ... 2>&1 | jq` gets it interleaved ahead of the JSON
+// and the parse fails — which is exactly how the published build broke while
+// the Bun build looked fine. Silence that one warning and let every other
+// through.
+{
+	const emit = process.emitWarning.bind(process);
+	process.emitWarning = ((warning: unknown, ...rest: unknown[]) => {
+		const text = warning instanceof Error ? warning.message : String(warning);
+		if (text.includes("SQLite is an experimental feature")) return;
+		(emit as (w: unknown, ...r: unknown[]) => void)(warning, ...rest);
+	}) as typeof process.emitWarning;
+}
 import { fileURLToPath } from "node:url";
 import { coerceParams, listCallableTools, runCall, type ToolSpec } from "./call.ts";
 import { applyAgentDir, applyConfigToEnv, loadConfig, syncInspectorEnv, type ParaConfig } from "./config.ts";

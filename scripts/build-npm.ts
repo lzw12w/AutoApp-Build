@@ -34,6 +34,9 @@ const RUNTIME_EXTERNALS = [
 	"typebox",
 ];
 
+/** Internal registry. bnpm requires private packages to carry a scope. */
+const REGISTRY = "https://bnpm.byted.org";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
 const run = (cmd: string[]) => {
@@ -93,9 +96,16 @@ pkg.dependencies = Object.fromEntries(
 	}),
 );
 pkg.bin = { para: "./cli.js" };
+// The repo manifest points main at ./src/index.ts, which is not shipped — leave
+// it and the entry dangles for anyone importing the package.
+pkg.main = "./index.js";
 pkg.files = ["cli.js", "index.js", "README.md"];
 pkg.engines = { node: ">=18" };
 pkg.type = pkg.type ?? "module";
+// Pin the registry in the package itself. Relying on the machine's global npm
+// config would mean one misconfigured shell publishes internal code to the
+// public registry — and an npm release cannot be taken back, only deprecated.
+pkg.publishConfig = { registry: REGISTRY, access: "restricted" };
 writeFileSync(join(dist, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
 writeFileSync(join(dist, "README.md"), readFileSync(join(root, "README.md")));
 
@@ -109,3 +119,42 @@ const packOut = Bun.spawnSync(["npm", "pack", "--silent", "--pack-destination", 
 if (packOut.exitCode !== 0) throw new Error(`npm pack failed:\n${packOut.stderr.toString()}`);
 const tgz = packOut.stdout.toString().trim().split("\n").pop();
 console.log(`\npackage: ${tgz}`);
+
+if (!process.argv.includes("--publish")) {
+	console.log(`install locally to test:  npm i -g ./${tgz}`);
+	console.log("publish:                  bun scripts/build-npm.ts --publish");
+	process.exit(0);
+}
+
+// Check the login first. Publishing unauthenticated fails with an opaque
+// ENEEDAUTH/403 that reads like a permission problem on the package name.
+const who = Bun.spawnSync(["npm", "whoami", "--registry", REGISTRY], {
+	stdout: "pipe",
+	stderr: "pipe",
+});
+if (who.exitCode !== 0) {
+	console.error(`Not logged in to ${REGISTRY}.`);
+	console.error("Run this first (it opens a browser for SSO):");
+	console.error("  npx @bytedance-dev/bnpm@latest login --auth-type=sso");
+	process.exit(1);
+}
+console.log(`publishing ${pkg.name}@${pkg.version} to ${REGISTRY} as ${who.stdout.toString().trim()}…`);
+
+// Refuse to overwrite a version that already exists: npm rejects it anyway,
+// but the error is clearer here and it catches a forgotten version bump.
+const existing = Bun.spawnSync(
+	["npm", "view", `${pkg.name}@${pkg.version}`, "version", "--registry", REGISTRY],
+	{ stdout: "pipe", stderr: "pipe" },
+);
+if (existing.exitCode === 0 && existing.stdout.toString().trim()) {
+	console.error(`${pkg.name}@${pkg.version} is already published. Bump the version first.`);
+	process.exit(1);
+}
+
+const pub = Bun.spawnSync(["npm", "publish", "--registry", REGISTRY], {
+	cwd: dist,
+	stdout: "inherit",
+	stderr: "inherit",
+});
+if (pub.exitCode !== 0) process.exit(pub.exitCode ?? 1);
+console.log(`\ndone. users install with:\n  npm i -g ${pkg.name}@latest`);

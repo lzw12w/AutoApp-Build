@@ -11,7 +11,21 @@ Agent 循环和模型层来自 [pi](https://github.com/earendil-works/pi)。本�
 
 把录屏放到 [`docs/demo.mp4`](docs/demo.mp4)（或 `docs/demo.gif`）即可在 GitHub 上直接播放。
 
-## 30 秒
+## 安装
+
+内网 npm（需要 Node >= 18，先把源指到 bnpm）：
+
+```bash
+npm config set registry https://bnpm.byted.org
+npm i -g @bytedance-dev/para@latest
+
+para doctor                           # Inspector + 密钥
+para exec -m "当前是什么页面，不要点"
+```
+
+装完命令就叫 `para`。更新到最新版重跑同一条 `npm i -g` 即可。
+
+## 从源码跑
 
 需要：[Bun](https://bun.sh)、真机 USB（iOS：macOS 自带的 usbmuxd，无需额外安装；Android：`adb`）、目标 App 以 Debug 打开 Inspector HTTP（默认 `:8765`）、以及 LLM 密钥。
 
@@ -20,6 +34,8 @@ bun install
 bun src/cli.ts doctor                 # Inspector + 密钥
 bun src/cli.ts exec -m "当前是什么页面，不要点"
 ```
+
+发包：`bun run build:npm` 出 tarball，`bun run release:npm` 发布（需先 SSO 登录）。
 
 密钥写在 `~/.para/agent/models.json`（或 `pi auth`），不要进仓库。用 `PARA_AGENT_DIR` 可改这个目录。Para 不读 `ANTHROPIC_*` / `OPENAI_*`，避免和别的代理抢环境变量。
 

@@ -1,5 +1,5 @@
 {
-	"name": "para",
+	"name": "@bytedance-dev/para",
 	"version": "0.1.0",
 	"description": "Drive a live iOS/Android app with natural language: view tree, not pixels.",
 	"type": "module",
@@ -12,7 +12,9 @@
 		"check": "tsc --noEmit",
 		"test": "bun test",
 		"para": "bun src/cli.ts",
-		"pi": "pi -e ./src/index.ts"
+		"pi": "pi -e ./src/index.ts",
+		"build:npm": "bun scripts/build-npm.ts",
+		"release:npm": "bun scripts/build-npm.ts --publish"
 	},
 	"dependencies": {
 		"@earendil-works/pi-coding-agent": "^0.84.4",

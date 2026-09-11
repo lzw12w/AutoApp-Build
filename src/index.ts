@@ -19,7 +19,7 @@ import { elideOldViewHierarchies } from "./compact/elide.ts";
 import { extractiveGuiSummary, generateGuiCompactionSummary } from "./compact/summary.ts";
 import { applyConfigToEnv, defaultNotePath, loadConfig, syncInspectorEnv } from "./config.ts";
 import { resolveIntoConfig } from "./ios-runtime/device-registry.ts";
-import { ensureLocalInspectorTunnel } from "./ios-runtime/tunnel.ts";
+import { listReadyDevices } from "./ios-runtime/device-broker.ts";
 import { identityForAction, safeParams } from "./knowledge/attribution.ts";
 import { resolveBundleId } from "./knowledge/bundle.ts";
 import { KnowledgeObserver } from "./knowledge/observer.ts";
@@ -63,7 +63,37 @@ export default function (pi: ExtensionAPI): void {
 	const cfg = loadConfig();
 	applyConfigToEnv(cfg);
 
-	const client = new InspectorClient({ host: cfg.inspectorHost, port: cfg.inspectorPort });
+	// Mid-session self-heal: a request can hit a hard disconnect when the device
+	// is unplugged or the app dies. Re-check that the device is actually back
+	// (one shared probe, not one per concurrent request) and let the transport
+	// retry, instead of burning the full timeout and failing.
+	let reconnecting: Promise<boolean> | null = null;
+	async function recheckDevice(): Promise<boolean> {
+		if (reconnecting) return reconnecting;
+		reconnecting = (async () => {
+			try {
+				const devices = await listReadyDevices();
+				if (!devices.length) return false;
+				// A named device must be the one that came back; an unnamed session
+				// accepts whatever single device is present.
+				const wanted = cfg.inspectorDevice.trim();
+				return wanted ? devices.some((d) => d.id === wanted) : devices.length === 1;
+			} catch {
+				return false;
+			} finally {
+				reconnecting = null;
+			}
+		})();
+		return reconnecting;
+	}
+
+	const client = new InspectorClient({
+		host: cfg.inspectorHost,
+		port: cfg.inspectorPort,
+		device: cfg.inspectorDevice,
+		remotePort: cfg.inspectorRemotePort,
+		onDisconnect: () => recheckDevice(),
+	});
 
 	// NOTE.md is snapshotted at load so mid-session record_knowledge writes
 	// do not mutate the live system prompt (same contract as the Python agent).
@@ -153,32 +183,24 @@ export default function (pi: ExtensionAPI): void {
 		brandTui(ctx.ui);
 		applyMode(mode, "session start", ctx.ui);
 		try {
-			if (cfg.autoTunnel) {
-				const deviceError = await resolveIntoConfig(cfg, { missingOk: !cfg.inspectorDevice.trim() });
-				if (deviceError) {
-					ctx.ui.notify(deviceError, "error");
-					return;
-				}
-				syncInspectorEnv(cfg);
-				client.retarget({ host: cfg.inspectorHost, port: cfg.inspectorPort });
+			// Device resolution is all the setup there is now: no tunnel to start,
+			// no local port to claim, no health probe to wait out.
+			const deviceError = await resolveIntoConfig(cfg, { missingOk: !cfg.inspectorDevice.trim() });
+			if (deviceError) {
+				ctx.ui.notify(deviceError, "error");
+				return;
 			}
-			const status = await ensureLocalInspectorTunnel({
-				host: cfg.inspectorHost,
-				port: cfg.inspectorPort,
-				identifier: cfg.inspectorDevice,
-				platform: cfg.inspectorPlatform,
+			syncInspectorEnv(cfg);
+			client.retarget({
+				device: cfg.inspectorDevice,
+				platform: cfg.inspectorPlatform === "auto" ? undefined : cfg.inspectorPlatform,
 				remotePort: cfg.inspectorRemotePort,
-				requireHealthy: false,
-				start: cfg.autoTunnel,
 			});
-			const level = status.ok ? "info" : "warning";
-			const device = cfg.inspectorDevice ? ` device=${cfg.inspectorDevice}` : "";
-			ctx.ui.notify(
-				`Para — inspector http://${cfg.inspectorHost}:${cfg.inspectorPort}${device} (tunnel: ${status.action}, mode: ${mode})`,
-				level,
-			);
+			const device = cfg.inspectorDevice ? `device=${cfg.inspectorDevice}` : "no device selected";
+			const platform = cfg.inspectorPlatform !== "auto" ? ` ${cfg.inspectorPlatform}` : "";
+			ctx.ui.notify(`Para —${platform} ${device} (port ${cfg.inspectorRemotePort ?? cfg.inspectorPort}, mode: ${mode})`, "info");
 		} catch (e) {
-			ctx.ui.notify(`Para loaded — tunnel setup skipped: ${e instanceof Error ? e.message : String(e)}`, "warning");
+			ctx.ui.notify(`Para loaded — device setup skipped: ${e instanceof Error ? e.message : String(e)}`, "warning");
 		}
 	});
 

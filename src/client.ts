@@ -8,6 +8,7 @@
  * to support pi's per-tool cancellation.
  */
 import { InvalidArgument, InvalidResponse } from "./errors.ts";
+import type { DevicePlatform } from "./ios-runtime/device-broker.ts";
 import { TapResult, VCNode, ViewNode } from "./models.ts";
 import { Transport } from "./transport.ts";
 import type { TransportOptions } from "./transport.ts";
@@ -142,7 +143,7 @@ export class InspectorClient {
 		return this.transport.baseUrl;
 	}
 
-	retarget(options: { host?: string; port?: number }): void {
+	retarget(options: { host?: string; port?: number; device?: string; platform?: DevicePlatform; remotePort?: number }): void {
 		this.transport.retarget(options);
 	}
 

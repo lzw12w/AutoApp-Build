@@ -42,13 +42,15 @@ export function applyAgentDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export interface ParaConfig {
+	/** Only used when transport is `tcp`; direct dialing ignores it. */
 	inspectorHost: string;
+	/** Only used when transport is `tcp`; direct dialing ignores it. */
 	inspectorPort: number;
 	inspectorDevice: string;
 	inspectorTimeoutMs: number;
-	/** `auto` infers ios vs android from --device / plugged-in devices. */
+	/** `auto` infers ios vs android from --device / connected devices. */
 	inspectorPlatform: "auto" | "ios" | "android";
-	/** On-device inspector port. Unset: Android 8765, iOS same as local port. */
+	/** Port the inspector listens on *inside the app*. Same on every device. */
 	inspectorRemotePort?: number;
 	bundleId: string;
 	knowledgeDir?: string;

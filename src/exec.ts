@@ -16,7 +16,6 @@ import { InspectorClient } from "./client.ts";
 import { applyConfigToEnv, llmKeySet, syncInspectorEnv, type ParaConfig } from "./config.ts";
 import { InspectorError } from "./errors.ts";
 import { resolveIntoConfig } from "./ios-runtime/device-registry.ts";
-import { ensureLocalInspectorTunnel } from "./ios-runtime/tunnel.ts";
 import { buildTools } from "./tools/index.ts";
 import { buildKnowledgeTools } from "./tools/knowledge.ts";
 import { recordKnowledgeTool } from "./tools/note.ts";
@@ -50,7 +49,6 @@ export interface DoctorResult {
 	device: {
 		id: string;
 		platform: string;
-		local_port: number;
 		remote_port: number;
 	} | null;
 }
@@ -104,7 +102,8 @@ export function resolveExecModel(cfg: ParaConfig, available: readonly Model<stri
 }
 
 export function listParaTools(disableKnowledge = false): string[] {
-	const client = new InspectorClient({ host: "localhost", port: 8765 });
+	// Names only: this client is never dialed, so the device/port are irrelevant.
+	const client = new InspectorClient();
 	const names = buildTools(client).map((t) => t.name);
 	names.push(todoWriteTool(new TodoList()).name);
 	names.push(recordKnowledgeTool("/dev/null").name);
@@ -124,7 +123,6 @@ function doctorDevice(cfg: ParaConfig): DoctorResult["device"] {
 	return {
 		id: cfg.inspectorDevice,
 		platform: cfg.inspectorPlatform,
-		local_port: cfg.inspectorPort,
 		remote_port: cfg.inspectorRemotePort ?? 8765,
 	};
 }
@@ -145,7 +143,7 @@ export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
 			busy: false,
 			inspector: {
 				reachable: false,
-				base_url: `http://${cfg.inspectorHost}:${cfg.inspectorPort}`,
+				base_url: "",
 				ping: null,
 				error: deviceError,
 			},
@@ -157,16 +155,19 @@ export async function probeDoctor(cfg: ParaConfig): Promise<DoctorResult> {
 
 	applyConfigToEnv(cfg);
 	syncInspectorEnv(cfg);
-	const client = new InspectorClient({ host: cfg.inspectorHost, port: cfg.inspectorPort });
-	const tunnel = await ensureLocalInspectorTunnel({
+	const client = new InspectorClient({
 		host: cfg.inspectorHost,
 		port: cfg.inspectorPort,
-		identifier: cfg.inspectorDevice,
-		platform: cfg.inspectorPlatform,
+		device: cfg.inspectorDevice,
+		platform: cfg.inspectorPlatform === "auto" ? undefined : cfg.inspectorPlatform,
 		remotePort: cfg.inspectorRemotePort,
-		requireHealthy: false,
-		start: cfg.autoTunnel,
 	});
+	// Nothing to set up: `ping` below either reaches the device or it doesn't.
+	// Reported under `tunnel` for output compatibility with earlier versions.
+	const tunnel: Record<string, unknown> = {
+		action: "direct",
+		detail: `dialing ${cfg.inspectorDevice || "the connected device"} port ${cfg.inspectorRemotePort ?? cfg.inspectorPort}`,
+	};
 
 	const inspector: DoctorResult["inspector"] = {
 		reachable: false,

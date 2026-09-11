@@ -13,7 +13,7 @@ Agent 循环和模型层来自 [pi](https://github.com/earendil-works/pi)。本�
 
 ## 30 秒
 
-需要：[Bun](https://bun.sh)、真机 USB（iOS：`iproxy`；Android：`adb`）、目标 App 以 Debug 打开 Inspector HTTP（默认 `:8765`）、以及 LLM 密钥。
+需要：[Bun](https://bun.sh)、真机 USB（iOS：macOS 自带的 usbmuxd，无需额外安装；Android：`adb`）、目标 App 以 Debug 打开 Inspector HTTP（默认 `:8765`）、以及 LLM 密钥。
 
 ```bash
 bun install
@@ -46,7 +46,9 @@ bun src/cli.ts doctor --device <adb-serial>
 bun src/cli.ts doctor --device <ios-udid>
 ```
 
-只插 Android、或不传 `--platform` 但 `--device` 能对上 `adb devices` 时，会自己 `adb forward`。
+Para 直接通过 usbmuxd（iOS）/ adb（Android）连到设备上的 Inspector 端口，不建本地端口转发，也不起 `iproxy` 子进程。因此多台设备可以共用同一个设备端口（默认 `8765`），插上即可用，不需要配端口。平台会从 `--device` 或当前连接的设备自动判断。
+
+如果你已经自己做了端口转发，可以用 `PARA_INSPECTOR_TRANSPORT=tcp` 让 Para 改连 `PARA_INSPECTOR_HOST:PARA_INSPECTOR_PORT`。
 
 ## CLI
 

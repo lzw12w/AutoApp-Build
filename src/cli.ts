@@ -31,11 +31,13 @@ Usage:
   para [chat] [pi-args...]   Interactive (pi TUI + this extension)
 
 Config: ~/.para/config.toml, then env
-  PARA_INSPECTOR_HOST / INSPECTOR_HOST   (default localhost)
-  PARA_INSPECTOR_PORT / INSPECTOR_PORT   (default 8765; --device assigns a local port)
   PARA_DEVICE_UDID / --device            UDID or adb serial; required with multiple devices
   PARA_INSPECTOR_PLATFORM / --platform   auto | ios | android
-  PARA_INSPECTOR_REMOTE_PORT / --remote-port
+  PARA_INSPECTOR_REMOTE_PORT / --remote-port  On-device inspector port (default 8765)
+  PARA_INSPECTOR_TRANSPORT               device (default) | tcp — dial the device
+                                         over USB, or connect to an existing
+                                         localhost forward
+  PARA_INSPECTOR_HOST / PARA_INSPECTOR_PORT   Only used when transport=tcp
 
 LLM: ~/.para/agent/models.json (or \`pi auth\`). Pick a model with llm_model in
   config.toml or --model. Separate from ~/.pi/agent; Para does not read
@@ -138,13 +140,13 @@ function formatDoctorText(d: Awaited<ReturnType<typeof probeDoctor>>): string {
 	const ping = d.inspector.reachable ? "ok" : `fail (${JSON.stringify(d.inspector.error)})`;
 	const llm = d.llm.key_set ? "key set" : d.llm.error;
 	const device = d.device
-		? `${d.device.platform} ${d.device.id} → 127.0.0.1:${d.device.local_port} (remote ${d.device.remote_port})`
+		? `${d.device.platform} ${d.device.id} → port ${d.device.remote_port} (direct, no port forward)`
 		: "unspecified";
 	return [
 		`inspector  ${d.inspector.base_url}  ${ping}`,
 		`device     ${device}`,
 		`llm        provider=${d.llm.provider}  ${llm}`,
-		`tunnel     ${d.tunnel.action ?? "?"}  ${d.tunnel.detail ?? ""}`,
+		`transport  ${d.tunnel.action ?? "?"}  ${d.tunnel.detail ?? ""}`,
 		`result     ${d.ok ? "ok" : d.code}`,
 		"",
 	].join("\n");

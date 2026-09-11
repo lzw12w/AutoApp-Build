@@ -35,7 +35,14 @@ npm i -g @bytedance-dev/para@latest   # 之后不用再带 --registry
 
 ## 多轮对话
 
-`para exec` 默认一次一问、无记忆。要让连续几次调用共享上下文，给同一个 `--session-id`：
+`para exec` 默认一次一问、无记忆。最省事的是 `--continue`，接上这个目录里最近一次会话：
+
+```bash
+para exec -m "打开搜索页" --continue
+para exec -m "输入'测试'并搜索" --continue
+```
+
+要精确指定接哪一段，用同一个 `--session-id`：
 
 ```bash
 para exec -m "打开搜索页" --session-id login-debug
@@ -44,7 +51,17 @@ para exec -m "结果列表有几条？" --session-id login-debug
 ```
 
 id 由你自己起（任意字符串）。首次调用创建会话，之后追加，历史存在
-`~/.para/agent/sessions/`。不传 `--session-id` 时留在内存里，跑完即弃、不落文件。
+`~/.para/agent/sessions/`。两者都不传时留在内存里，跑完即弃、不落文件。
+
+接上已有会话时，返回值会多一个 `session_resumed`：
+
+```json
+{ "session_id": "login-debug",
+  "session_resumed": { "created": "2026-09-11T10:41:19Z", "turns": 3 } }
+```
+
+因为 id 是你自己起的，两个脚本都用 `debug` 就会共享同一段对话。这个字段让你
+看得出"我接上的会话建于何时、已经聊了几轮"——首次创建时它不出现。
 
 交互模式则天然连续，并支持挑选历史会话：
 
@@ -128,12 +145,40 @@ Para 直接通过 usbmuxd（iOS）/ adb（Android）连到设备上的 Inspector
 ## CLI
 
 ```
-para exec -m "<prompt>"      一轮，JSON stdout
+para exec -m "<prompt>" [--continue | --session-id <id>]   一轮，JSON stdout
+para call --list             可直接调用的工具及参数
+para call <tool> --help      单个工具的参数说明
+para call <tool> [...]       直接调一个工具，不经过模型
 para serve [--serve-host H] [--serve-port P]   Web UI，默认 127.0.0.1:7777
-para doctor [--json]         Inspector + 密钥
+para doctor [--json]         Inspector + 密钥 + 已连设备 + 已连设备
 para tools                   已注册工具名
 para [chat] [pi-args...]     交互（pi TUI + 本仓库 extension）
 ```
+
+### para call：自己挑工具
+
+`para exec` 是把任务交给 Para，由它决定用哪些工具。`para call` 是另一头——
+你已经知道要调什么，于是不花模型 token、不起 agent 轮次：
+
+```bash
+para call screen_digest                      # 整屏摘要
+para call ab_experiments --limit 5           # A/B 分组
+para call feature_flags                      # feature flag
+para call user_defaults --prefix sa_         # UserDefaults
+para call tap_with_diff --text 搜索           # 点一下
+para call swipe --json '{"start_x":100,"start_y":600,"end_x":100,"end_y":200}'
+```
+
+参数用 `--flag` 或一整个 `--json`，类型按工具自己的 schema 转换。
+`--list` 和 `--help` 都从 schema 生成，不会和实现漂移——也就不必一开始
+把全部工具塞进上下文，想用哪个再看哪个。
+
+改变界面的工具（点、滑、输入、返回、切 tab……）走 `call` 时同样会更新知识
+图谱，和经过 agent 时一致；否则用 `call` 驱动一整轮之后，`navigate_to_page`
+会规划不出它没学到的路径。
+
+`switch_mode` 和 `todo_write` 不在 `call` 里：它们改的是一次会话往后的状态，
+而 `call` 跑完就退出。两个都仍可通过 `para exec` 使用。
 
 常用参数：`--host` `--port` `--device` / `-d` `--platform` `--remote-port`。
 

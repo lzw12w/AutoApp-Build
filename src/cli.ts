@@ -11,6 +11,7 @@
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { coerceParams, listCallableTools, runCall, type ToolSpec } from "./call.ts";
 import { applyAgentDir, applyConfigToEnv, loadConfig, syncInspectorEnv, type ParaConfig } from "./config.ts";
 import {
 	execExitCode,
@@ -189,6 +190,128 @@ async function main(argv: string[]): Promise<number> {
 		const { cfg } = withCliOverrides(argv.slice(1));
 		for (const name of listParaTools(cfg.disableKnowledge)) process.stdout.write(`${name}\n`);
 		return 0;
+	}
+
+	if (head === "call") {
+		const rest = argv.slice(1);
+		const json = hasFlag(rest, "--json-out");
+		const wantList = hasFlag(rest, "--list");
+		const positional = rest.filter((a) => !a.startsWith("-"));
+		const toolName = positional[0];
+
+		// --list, and `call` with no tool, both mean "what can I call?".
+		// Progressive discovery: names and one-line purpose here, full
+		// parameters only when asked for a specific tool via --help.
+		if (wantList || !toolName) {
+			const { cfg } = withCliOverrides(rest.filter((a) => a !== "--list" && a !== "--json-out"));
+			const specs = await listCallableTools(cfg);
+			if (json) {
+				process.stdout.write(`${JSON.stringify(specs, null, 2)}\n`);
+				return 0;
+			}
+			for (const t of specs as ToolSpec[]) {
+				const req = t.params.filter((p: ToolSpec["params"][number]) => p.required).map((p) => `--${p.name} <${p.type}>`);
+				const opt = t.params.filter((p: ToolSpec["params"][number]) => !p.required).length;
+				const sig = [...req, opt ? `[+${opt} optional]` : ""].filter(Boolean).join(" ");
+				process.stdout.write(`${t.name.padEnd(20)}${sig}\n`);
+			}
+			process.stdout.write(`\nUse \`para call <tool> --help\` for parameters.\n`);
+			return 0;
+		}
+
+		// Per-tool --help, generated from the tool's own schema so it cannot
+		// drift from the implementation.
+		if (hasFlag(rest, "--help") || hasFlag(rest, "-h")) {
+			const { cfg } = withCliOverrides(rest.filter((a) => a !== "--help" && a !== "-h" && a !== toolName));
+			const spec = (await listCallableTools(cfg)).find((t) => t.name === toolName);
+			if (!spec) {
+				process.stderr.write(`unknown tool "${toolName}" — run \`para call --list\`\n`);
+				return 2;
+			}
+			process.stdout.write(`${spec.name} — ${spec.label}\n\n${spec.description}\n`);
+			if (spec.params.length) {
+				process.stdout.write("\nparameters\n");
+				for (const p of spec.params) {
+					const mark = p.required ? "*" : " ";
+					const choices = p.enum ? ` (${p.enum.join("|")})` : "";
+					process.stdout.write(`  ${mark} --${p.name.padEnd(20)} ${p.type}${choices}\n`);
+					if (p.description) process.stdout.write(`      ${p.description}\n`);
+				}
+				process.stdout.write("\n  * required. Use --json '{...}' for nested or exclusive params.\n");
+			} else {
+				process.stdout.write("\ntakes no parameters\n");
+			}
+			return 0;
+		}
+
+		// Params come either as one --json blob or as individual flags.
+		const jsonFlag = takeFlag(rest, ["--json"]);
+		let params: Record<string, unknown> = {};
+		const flagPairs: Record<string, string | boolean> = {};
+		const passthrough: string[] = [];
+		if (jsonFlag.value) {
+			try {
+				params = JSON.parse(jsonFlag.value) as Record<string, unknown>;
+			} catch (e) {
+				process.stderr.write(`--json is not valid JSON: ${e instanceof Error ? e.message : String(e)}\n`);
+				return 2;
+			}
+			passthrough.push(...jsonFlag.rest);
+		} else {
+			// Split "--flag value" / "--flag" from config overrides, which
+			// withCliOverrides owns. Tool params are whatever the schema names.
+			const words = jsonFlag.rest.filter((a) => a !== toolName && a !== "--json-out");
+			const { cfg: probeCfg } = withCliOverrides([]);
+			const spec = (await listCallableTools(probeCfg)).find((t) => t.name === toolName);
+			const known = new Set(spec?.params.map((p: ToolSpec["params"][number]) => p.name) ?? []);
+			for (let i = 0; i < words.length; i++) {
+				const w = words[i];
+				if (!w?.startsWith("--")) {
+					passthrough.push(w ?? "");
+					continue;
+				}
+				const key = w.slice(2);
+				if (!known.has(key)) {
+					passthrough.push(w);
+					const next = words[i + 1];
+					if (next && !next.startsWith("--")) {
+						passthrough.push(next);
+						i++;
+					}
+					continue;
+				}
+				const next = words[i + 1];
+				if (next && !next.startsWith("--")) {
+					flagPairs[key] = next;
+					i++;
+				} else {
+					flagPairs[key] = true;
+				}
+			}
+		}
+
+		const { cfg } = withCliOverrides(passthrough);
+		if (!jsonFlag.value && Object.keys(flagPairs).length) {
+			const spec = (await listCallableTools(cfg)).find((t) => t.name === toolName);
+			const schema = {
+				properties: Object.fromEntries(
+					(spec?.params ?? []).map((p: ToolSpec["params"][number]) => [
+						p.name,
+						p.enum ? { type: "string", enum: p.enum } : { type: p.type },
+					]),
+				),
+			};
+			try {
+				params = coerceParams(flagPairs, schema);
+			} catch (e) {
+				process.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
+				return 2;
+			}
+		}
+
+		const result = await runCall(cfg, toolName, params);
+		process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+		return result.ok ? 0 : 1;
 	}
 
 	if (head === "models") {

@@ -13,17 +13,25 @@ Agent 循环和模型层来自 [pi](https://github.com/earendil-works/pi)。本�
 
 ## 安装
 
-内网 npm（需要 Node >= 18，先把源指到 bnpm）：
+需要 Node >= 18。包在内网 bnpm 上，一条命令即可，**不用改你的全局 registry**：
 
 ```bash
-npm config set registry https://bnpm.byted.org
-npm i -g @bytedance-dev/para@latest
+npm i -g @bytedance-dev/para@latest --registry=https://bnpm.byted.org
 
 para doctor                           # Inspector + 密钥
 para exec -m "当前是什么页面，不要点"
 ```
 
-装完命令就叫 `para`。更新到最新版重跑同一条 `npm i -g` 即可。
+装完命令就叫 `para`。升级重跑同一条命令。安装不需要登录 bnpm（匿名可读）。
+
+如果你经常装内网包，也可以只让这一个 scope 走 bnpm，别的包不受影响：
+
+```bash
+npm config set @bytedance-dev:registry https://bnpm.byted.org
+npm i -g @bytedance-dev/para@latest   # 之后不用再带 --registry
+```
+
+不建议 `npm config set registry`：那会把所有项目的 npm 流量都改道。
 
 ## 从源码跑
 

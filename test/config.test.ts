@@ -143,4 +143,29 @@ describe("resolveExecModel", () => {
 		const model = resolveExecModel(loadConfig({ tomlPath: "/nope", env: {} }), []);
 		expect(model).toBeUndefined();
 	});
+
+	// The caller distinguishes these two undefined cases: unset means "let pi
+	// pick", but a requested-and-unmatched name is a typo that runExec reports
+	// as model_not_found instead of silently using another model.
+	test("returns undefined when llm_model matches nothing", () => {
+		const available = [
+			{ id: "deepseek-v4-flash", name: "deepseek-v4-flash" },
+		] as unknown as Parameters<typeof resolveExecModel>[1];
+		const model = resolveExecModel(
+			{ ...loadConfig({ tomlPath: "/nope", env: {} }), llmModel: "deepseek-v4-flashh" },
+			available,
+		);
+		expect(model).toBeUndefined();
+	});
+
+	test("matches by name substring, not just exact id", () => {
+		const available = [
+			{ id: "model_api/experimental_0630", name: "Experimental 0630 (256K context)" },
+		] as unknown as Parameters<typeof resolveExecModel>[1];
+		const model = resolveExecModel(
+			{ ...loadConfig({ tomlPath: "/nope", env: {} }), llmModel: "Experimental 0630" },
+			available,
+		);
+		expect(model?.id).toBe("model_api/experimental_0630");
+	});
 });

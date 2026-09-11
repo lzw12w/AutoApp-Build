@@ -284,6 +284,28 @@ export async function runExec(cfg: ParaConfig, message: string): Promise<ExecRes
 	const available = await modelRuntime.getAvailable();
 	const model = resolveExecModel(cfg, available);
 
+	// An unset llm_model legitimately means "let pi pick". But a model that was
+	// asked for and did not match is almost always a typo, and silently falling
+	// back to pi's default sends the request to some other model — which comes
+	// back as an opaque 403/404 from that provider instead of naming the real
+	// problem. Say which name failed and what is actually selectable.
+	if (!model && cfg.llmModel.trim()) {
+		const catalog =
+			available.length > 0
+				? available.map((m) => `${m.provider}/${m.id}`).join(", ")
+				: "(none — no provider in ~/.para/agent/models.json has a usable credential)";
+		return {
+			ok: false,
+			code: "model_not_found",
+			reply: "",
+			session_id: null,
+			steps: [],
+			step_count: 0,
+			busy: false,
+			error: `llm_model "${cfg.llmModel.trim()}" matched no available model. Available: ${catalog}`,
+		};
+	}
+
 	const thinkingLevel =
 		cfg.anthropicThinkingBudget && cfg.anthropicThinkingBudget >= 8192
 			? "high"

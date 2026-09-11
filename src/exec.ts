@@ -254,6 +254,32 @@ export async function runExec(cfg: ParaConfig, message: string): Promise<ExecRes
 	});
 	await resourceLoader.reload();
 
+	// If the extension fails to load, pi records the error and carries on with
+	// zero Para tools registered. The agent then answers from imagination and
+	// exec still reports ok, which is worse than crashing: the caller cannot
+	// tell a real observation from a guess. Fail loudly instead.
+	//
+	// `extensionsResult` is private in DefaultResourceLoader and there is no
+	// public accessor for load errors, so read it structurally.
+	const loaderErrors = (
+		resourceLoader as unknown as {
+			extensionsResult?: { errors?: { path?: string; error?: unknown }[] };
+		}
+	).extensionsResult?.errors;
+	if (loaderErrors && loaderErrors.length > 0) {
+		const detail = loaderErrors.map((e) => `${e.path ?? "?"}: ${String(e.error)}`).join("; ");
+		return {
+			ok: false,
+			code: "extension_error",
+			reply: "",
+			session_id: null,
+			steps: [],
+			step_count: 0,
+			busy: false,
+			error: `Failed to load the Para extension, so no device tools are available: ${detail}`,
+		};
+	}
+
 	const modelRuntime = await ModelRuntime.create();
 	const available = await modelRuntime.getAvailable();
 	const model = resolveExecModel(cfg, available);

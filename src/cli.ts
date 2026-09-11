@@ -2,11 +2,11 @@
 /**
  * `para` CLI.
  *
- *   para                 interactive (pi CLI + this extension)
- *   para chat [...]      same, extra args forwarded to pi
  *   para exec -m "..."   one machine-stable turn (JSON on stdout)
+ *   para serve           Web UI + agent/graph API
  *   para doctor [--json] inspector + LLM-key probe
  *   para tools           list registered tool names
+ *   para [chat] [...]    interactive (pi CLI + this extension)
  */
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -21,27 +21,25 @@ function piCliPath(): string {
 }
 
 function printHelp(): void {
-	process.stdout.write(`Para — iOS GUI agent on pi
+	process.stdout.write(`Para — drive a live iOS/Android app with natural language
 
 Usage:
-  para [chat] [pi-args...]   Interactive session (pi CLI + Para extension)
   para exec -m "<prompt>"    One turn; JSON on stdout
+  para serve [--serve-host H] [--serve-port P]  Web UI, default 127.0.0.1:7777
   para doctor [--json]       Inspector + API-key probe
-  para tools                 List tools this extension registers
+  para tools                 List registered tool names
+  para [chat] [pi-args...]   Interactive (pi TUI + this extension)
 
 Config: ~/.para/config.toml, then env
   PARA_INSPECTOR_HOST / INSPECTOR_HOST   (default localhost)
-  PARA_INSPECTOR_PORT / INSPECTOR_PORT   (default 8765; --device 会自动改写)
-  PARA_DEVICE_UDID / --device            UDID 或 adb serial；多机必填，自动分配本地端口
+  PARA_INSPECTOR_PORT / INSPECTOR_PORT   (default 8765; --device assigns a local port)
+  PARA_DEVICE_UDID / --device            UDID or adb serial; required with multiple devices
   PARA_INSPECTOR_PLATFORM / --platform   auto | ios | android
   PARA_INSPECTOR_REMOTE_PORT / --remote-port
-  PARA_MODE / --para-mode          gui (device) or code (repo)
 
-LLM: configured in pi, from Para's own home. Add a provider (baseUrl + apiKey +
-  models) to ~/.para/agent/models.json, then select it with llm_model in
-  config.toml or --model. Kept separate from ~/.pi/agent; Para never reads
-  ANTHROPIC_* / OPENAI_*, so a separate proxy can own those.
-  (override home with PARA_AGENT_DIR)
+LLM: ~/.para/agent/models.json (or \`pi auth\`). Pick a model with llm_model in
+  config.toml or --model. Separate from ~/.pi/agent; Para does not read
+  ANTHROPIC_* / OPENAI_*. Override home with PARA_AGENT_DIR.
 `);
 }
 

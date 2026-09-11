@@ -1,5 +1,5 @@
 /**
- * Para iOS tools, ported from ios_inspector_agent/actions/*.py to pi's
+ * Para GUI tools, ported from ios_inspector_agent/actions/*.py to pi's
  * `defineTool` / `registerTool` shape. Each tool wraps an InspectorClient
  * call, returns Para's structured ok/data (or ok:false) result, and threads
  * the AbortSignal through for cancellation.

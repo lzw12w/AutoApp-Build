@@ -31,6 +31,8 @@ export const PARA_AGENT_DIR = join(homedir(), ".para", "agent");
 export function applyAgentDir(env: NodeJS.ProcessEnv = process.env): string {
 	const dir = env.PARA_AGENT_DIR?.trim() || PARA_AGENT_DIR;
 	env.PI_CODING_AGENT_DIR = dir;
+	// Para is not a pi distribution. Leave an explicit user value alone.
+	if (!env.PI_SKIP_VERSION_CHECK?.trim()) env.PI_SKIP_VERSION_CHECK = "1";
 	try {
 		mkdirSync(dir, { recursive: true });
 	} catch {

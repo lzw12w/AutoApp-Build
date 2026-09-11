@@ -1,7 +1,7 @@
 {
-	"name": "para-ios",
+	"name": "para",
 	"version": "0.1.0",
-	"description": "Para — natural-language GUI agent for live iOS/Android apps, as a pi extension.",
+	"description": "Drive a live iOS/Android app with natural language: view tree, not pixels.",
 	"type": "module",
 	"private": true,
 	"main": "./src/index.ts",

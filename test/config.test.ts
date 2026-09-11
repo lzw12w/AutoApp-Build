@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyConfigToEnv, loadConfig, parseFlatToml, syncInspectorEnv } from "../src/config.ts";
+import { applyAgentDir, applyConfigToEnv, loadConfig, parseFlatToml, syncInspectorEnv } from "../src/config.ts";
 import { resolveExecModel } from "../src/exec.ts";
 
 describe("parseFlatToml", () => {
@@ -108,6 +108,21 @@ describe("loadConfig", () => {
 		expect(env.PARA_DEVICE_UDID).toBe("SERIAL");
 		expect(env.PARA_INSPECTOR_PLATFORM).toBe("android");
 		expect(env.PARA_INSPECTOR_REMOTE_PORT).toBe("8765");
+	});
+});
+
+describe("applyAgentDir", () => {
+	test("skips pi version checks unless the user already set PI_SKIP_VERSION_CHECK", () => {
+		const env: NodeJS.ProcessEnv = { PARA_AGENT_DIR: "/tmp/para-skip-version-test" };
+		applyAgentDir(env);
+		expect(env.PI_SKIP_VERSION_CHECK).toBe("1");
+
+		const kept: NodeJS.ProcessEnv = {
+			PARA_AGENT_DIR: "/tmp/para-skip-version-test",
+			PI_SKIP_VERSION_CHECK: "0",
+		};
+		applyAgentDir(kept);
+		expect(kept.PI_SKIP_VERSION_CHECK).toBe("0");
 	});
 });
 

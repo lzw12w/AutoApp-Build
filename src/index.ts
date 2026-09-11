@@ -1,16 +1,17 @@
 /**
- * Para iOS — pi extension entry point.
+ * Para — pi extension entry point.
  *
- * Para is an App-runtime GUI agent: it drives a running iOS app in natural
- * language and builds a knowledge graph as it explores. Historically it was a
- * standalone Python agent; it is rebuilt as a pi extension so the agent loop,
- * multi-provider LLM layer, and tool execution come from pi
- * (@earendil-works/pi-*). Para owns the iOS domain (device transport, tools,
- * knowledge graph) and GUI-specific context compression: Layer 1 view_hierarchy
- * elision, ingest payload minify, and a GUI compaction summary.
+ * Para is an App-runtime GUI agent: it drives a running iOS/Android app in
+ * natural language and builds a knowledge graph as it explores. Historically
+ * it was a standalone Python agent; it is rebuilt as a pi extension so the
+ * agent loop, multi-provider LLM layer, and tool execution come from pi
+ * (@earendil-works/pi-*). Para owns the device domain (Inspector transport,
+ * tools, knowledge graph) and GUI-specific context compression: Layer 1
+ * view_hierarchy elision, ingest payload minify, and a GUI compaction summary.
  *
  * Load with:  pi -e ./src/index.ts   or   bun src/cli.ts
  */
+import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { InspectorClient } from "./client.ts";
 import { compactToolResultContent } from "./compact/payload.ts";
@@ -41,6 +42,22 @@ import { buildKnowledgeTools, type KnowledgeContext } from "./tools/knowledge.ts
 import { recordKnowledgeTool } from "./tools/note.ts";
 import { contentLooksFailed } from "./tools/result.ts";
 import { renderTodosReminder, TodoList, todoWriteTool } from "./tools/todo.ts";
+
+const PARA_TITLE = "Para";
+
+/** Replace pi's startup banner and terminal tab name. Layout stays pi's. */
+function brandTui(ui: ExtensionUIContext | undefined, sessionName?: string): void {
+	if (!ui) return;
+	const cwd = basename(process.cwd()) || PARA_TITLE;
+	const title = sessionName ? `${PARA_TITLE} - ${sessionName} - ${cwd}` : `${PARA_TITLE} - ${cwd}`;
+	ui.setTitle?.(title);
+	ui.setHeader?.((_tui, theme) => ({
+		invalidate() {},
+		render(): string[] {
+			return [theme.bold(theme.fg("accent", PARA_TITLE)), theme.fg("dim", "drive a live iOS/Android app")];
+		},
+	}));
+}
 
 export default function (pi: ExtensionAPI): void {
 	const cfg = loadConfig();
@@ -133,6 +150,7 @@ export default function (pi: ExtensionAPI): void {
 		// proxy's ANTHROPIC_*.
 		mode = parseModeOrDefault(pi.getFlag("para-mode"), cfg.mode);
 		lastUi = ctx.ui;
+		brandTui(ctx.ui);
 		applyMode(mode, "session start", ctx.ui);
 		try {
 			if (cfg.autoTunnel) {
@@ -160,8 +178,13 @@ export default function (pi: ExtensionAPI): void {
 				level,
 			);
 		} catch (e) {
-			ctx.ui.notify(`Para iOS loaded — tunnel setup skipped: ${e instanceof Error ? e.message : String(e)}`, "warning");
+			ctx.ui.notify(`Para loaded — tunnel setup skipped: ${e instanceof Error ? e.message : String(e)}`, "warning");
 		}
+	});
+
+	pi.on("session_info_changed", async (event, ctx) => {
+		lastUi = ctx.ui;
+		brandTui(ctx.ui, event.name);
 	});
 
 	pi.on("before_agent_start", async (event) => {

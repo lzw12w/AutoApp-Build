@@ -63,6 +63,7 @@ describe("extension entry", () => {
 		expect(commands.has("code")).toBe(true);
 		expect(commands.has("mode")).toBe(true);
 		expect(events.has("session_start")).toBe(true);
+		expect(events.has("session_info_changed")).toBe(true);
 		expect(events.has("before_agent_start")).toBe(true);
 		expect(events.has("context")).toBe(true);
 		expect(events.has("session_before_compact")).toBe(true);
@@ -73,7 +74,23 @@ describe("extension entry", () => {
 			event: unknown,
 			ctx: { ui: { notify: (msg: string, level?: string) => void } },
 		) => Promise<void>;
-		await start({}, { ui });
+		const titles: string[] = [];
+		let headerSet = false;
+		await start(
+			{},
+			{
+				ui: {
+					...ui,
+					setTitle: (t: string) => titles.push(t),
+					setHeader: () => {
+						headerSet = true;
+					},
+				},
+			},
+		);
+		expect(headerSet).toBe(true);
+		expect(titles[0]).toMatch(/^Para - /);
+
 		const active = getActive();
 		expect(active?.filter((n) => n !== "read")).toEqual([...tools.keys()]);
 		expect(active?.includes("read")).toBe(true);

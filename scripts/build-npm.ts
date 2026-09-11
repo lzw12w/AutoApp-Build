@@ -23,6 +23,7 @@
  *    real dependencies that npm installs.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,6 +37,13 @@ const RUNTIME_EXTERNALS = [
 
 /** Internal registry. bnpm requires private packages to carry a scope. */
 const REGISTRY = "https://bnpm.byted.org";
+
+// bnpm's SSO login writes the token to the real ~/.npmrc, but npm honours a
+// NPM_CONFIG_USERCONFIG env var over it — some sandboxes and IDEs set one, and
+// then a valid login still reports ENEEDAUTH. Pin userconfig to the file the
+// login actually wrote to.
+const NPMRC = join(homedir(), ".npmrc");
+const AUTH_ARGS = ["--userconfig", NPMRC, "--registry", REGISTRY];
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
@@ -128,7 +136,7 @@ if (!process.argv.includes("--publish")) {
 
 // Check the login first. Publishing unauthenticated fails with an opaque
 // ENEEDAUTH/403 that reads like a permission problem on the package name.
-const who = Bun.spawnSync(["npm", "whoami", "--registry", REGISTRY], {
+const who = Bun.spawnSync(["npm", "whoami", ...AUTH_ARGS], {
 	stdout: "pipe",
 	stderr: "pipe",
 });
@@ -143,7 +151,7 @@ console.log(`publishing ${pkg.name}@${pkg.version} to ${REGISTRY} as ${who.stdou
 // Refuse to overwrite a version that already exists: npm rejects it anyway,
 // but the error is clearer here and it catches a forgotten version bump.
 const existing = Bun.spawnSync(
-	["npm", "view", `${pkg.name}@${pkg.version}`, "version", "--registry", REGISTRY],
+	["npm", "view", `${pkg.name}@${pkg.version}`, "version", ...AUTH_ARGS],
 	{ stdout: "pipe", stderr: "pipe" },
 );
 if (existing.exitCode === 0 && existing.stdout.toString().trim()) {
@@ -151,7 +159,7 @@ if (existing.exitCode === 0 && existing.stdout.toString().trim()) {
 	process.exit(1);
 }
 
-const pub = Bun.spawnSync(["npm", "publish", "--registry", REGISTRY], {
+const pub = Bun.spawnSync(["npm", "publish", ...AUTH_ARGS], {
 	cwd: dist,
 	stdout: "inherit",
 	stderr: "inherit",

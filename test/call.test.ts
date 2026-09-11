@@ -6,7 +6,7 @@
  * hand rather than here; see the commit message for the recorded run.
  */
 import { describe, expect, test } from "bun:test";
-import { coerceParams } from "../src/call.ts";
+import { coerceParams, resultPayloadForTest } from "../src/call.ts";
 
 describe("coerceParams", () => {
 	// Flags arrive as strings; a schema wanting a number rejects "3".
@@ -49,5 +49,42 @@ describe("coerceParams", () => {
 		// The CLI filters unknown flags before this point; if one slips
 		// through, forward it and let schema validation report it.
 		expect(coerceParams({ mystery: "x" }, { properties: {} })).toEqual({ mystery: "x" });
+	});
+});
+
+describe("resultPayload", () => {
+	// screenshot returns {width,height} as text plus the pixels as an image
+	// block. Returning only the text would hand back dimensions and silently
+	// drop the one thing the caller asked for.
+	test("keeps image data alongside the text payload", () => {
+		const out = resultPayloadForTest({
+			content: [
+				{ type: "text", text: JSON.stringify({ ok: true, width: 128, height: 277 }) },
+				{ type: "image", data: "QUJD", mimeType: "image/jpeg" },
+			],
+			details: { ok: true },
+		});
+		expect(out).toEqual({
+			ok: true,
+			width: 128,
+			height: 277,
+			images: [{ mime_type: "image/jpeg", base64: "QUJD" }],
+		});
+	});
+
+	test("unwraps the ok/data envelope so callers pipe straight to jq", () => {
+		const out = resultPayloadForTest({
+			content: [{ type: "text", text: JSON.stringify({ ok: true, data: { count: 2 } }) }],
+			details: { ok: true },
+		});
+		expect(out).toEqual({ count: 2 });
+	});
+
+	test("plain-text results (screen_digest) pass through as text", () => {
+		const out = resultPayloadForTest({
+			content: [{ type: "text", text: "VC: SomeController\n@1 UIView" }],
+			details: { ok: true },
+		});
+		expect(out).toBe("VC: SomeController\n@1 UIView");
 	});
 });

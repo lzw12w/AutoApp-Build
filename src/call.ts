@@ -389,24 +389,45 @@ export async function runCall(
  * JSON so the caller can pipe it into jq without unwrapping a string. The
  * ok/data envelope is stripped here since the outer result already reports ok.
  */
+export function resultPayloadForTest(result: AgentToolResult<unknown>): unknown {
+	return resultPayload(result);
+}
+
 function resultPayload(result: AgentToolResult<unknown>): unknown {
+	// Image blocks carry the actual pixels (screenshot). textOf ignores them, so
+	// a caller would otherwise get only {width, height} and no way to see the
+	// screen — the one thing it asked for. Surface base64 alongside the text.
+	const images = Array.isArray(result.content)
+		? result.content
+				.filter((c) => (c as { type?: string }).type === "image")
+				.map((c) => {
+					const img = c as { data?: string; mimeType?: string };
+					return { mime_type: img.mimeType ?? "image/jpeg", base64: img.data ?? "" };
+				})
+				.filter((i) => i.base64)
+		: [];
+
 	const text = textOf(result.content);
 	if (text) {
 		const trimmed = text.trim();
 		if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
 			try {
 				const parsed = JSON.parse(trimmed) as unknown;
-				if (parsed && typeof parsed === "object" && "data" in (parsed as Record<string, unknown>)) {
-					return (parsed as Record<string, unknown>).data;
+				const unwrapped =
+					parsed && typeof parsed === "object" && "data" in (parsed as Record<string, unknown>)
+						? (parsed as Record<string, unknown>).data
+						: parsed;
+				if (images.length && unwrapped && typeof unwrapped === "object" && !Array.isArray(unwrapped)) {
+					return { ...(unwrapped as Record<string, unknown>), images };
 				}
-				return parsed;
+				return unwrapped;
 			} catch {
 				// Not JSON after all; fall through to the raw text.
 			}
 		}
-		return text;
+		return images.length ? { text, images } : text;
 	}
-	// Image-only results (screenshot) carry no text; hand back the blocks.
+	if (images.length) return { images };
 	return result.content ?? result.details ?? null;
 }
 

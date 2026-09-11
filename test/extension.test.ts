@@ -70,9 +70,18 @@ describe("extension entry", () => {
 		expect(events.has("tool_call")).toBe(true);
 		expect(events.has("tool_result")).toBe(true);
 
+		// The session_start handler uses more of the ui surface than notify alone;
+		// declare what we actually pass so the cast matches the call site.
 		const start = events.get("session_start") as (
 			event: unknown,
-			ctx: { ui: { notify: (msg: string, level?: string) => void } },
+			ctx: {
+				ui: {
+					notify: (msg: string, level?: string) => void;
+					setStatus?: (key: string, text: string | undefined) => void;
+					setTitle?: (title: string) => void;
+					setHeader?: (header: unknown) => void;
+				};
+			},
 		) => Promise<void>;
 		const titles: string[] = [];
 		let headerSet = false;

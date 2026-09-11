@@ -23,6 +23,36 @@ bun src/cli.ts exec -m "当前是什么页面，不要点"
 
 密钥写在 `~/.para/agent/models.json`（或 `pi auth`），不要进仓库。用 `PARA_AGENT_DIR` 可改这个目录。Para 不读 `ANTHROPIC_*` / `OPENAI_*`，避免和别的代理抢环境变量。
 
+### 模型配置：你只需要改两个文件
+
+| 文件 | 归属 | 放什么 | 要手改吗 |
+| --- | --- | --- | --- |
+| `~/.para/config.toml` | Para | 用哪个模型（`llm_model`）、连哪台设备 | 要 |
+| `~/.para/agent/models.json` | pi | provider 定义 + baseUrl + apiKey | 要 |
+| `~/.para/agent/models-store.json` | pi 自动写 | 远程模型目录缓存（带 etag） | **不要手改**，删掉无副作用 |
+
+分工是：**`models.json` 说"有哪些模型、怎么连"，`config.toml` 说"这次用哪个"**。密钥只出现在前者，Para 自己不碰凭据。
+
+加一个模型：在 `models.json` 的 `providers` 下加一项，`api` 取 `anthropic-messages` / `openai-responses` / `openai-completions` 之一。
+
+```jsonc
+{ "providers": { "my-provider": {
+    "baseUrl": "https://api.example.com/anthropic",
+    "api": "anthropic-messages",
+    "apiKey": "sk-...",
+    "models": [{ "id": "some-model-id", "name": "some-model-id",
+                 "contextWindow": 200000, "maxTokens": 32768 }]
+} } }
+```
+
+然后确认它真的可用——**`models.json` 里配了不等于能用**（可能没权限、key 失效、id 写错）：
+
+```bash
+para models        # 带 * 的是当前选中；只列出凭据可用的
+```
+
+选模型改 `config.toml` 的 `llm_model`，或临时用 `PARA_LLM_MODEL=xxx`。名字写错会直接报 `model_not_found` 并列出可选项，不会静默换成别的模型。
+
 ## 不是什么
 
 - 不是 XCUITest / Espresso 替代，也不改你的 App 源码

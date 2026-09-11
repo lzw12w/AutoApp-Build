@@ -101,6 +101,53 @@ export function resolveExecModel(cfg: ParaConfig, available: readonly Model<stri
 	return available.find((m) => m.id.toLowerCase() === needle || m.name.toLowerCase().includes(needle));
 }
 
+export interface ModelListing {
+	/** Models with a working credential — these are the ones llm_model can name. */
+	available: { provider: string; id: string; selected: boolean }[];
+	/** How many models pi knows of but cannot authenticate. Over a thousand in a
+	 * default install, so the ids are only included when explicitly requested. */
+	unauthenticatedCount: number;
+	/** Populated only when `includeUnauthenticated` is set. */
+	unauthenticated?: { provider: string; id: string }[];
+	/** What llm_model currently says, whether or not it resolves. */
+	requested: string;
+	/** True when llm_model is set but matches nothing in `available`. */
+	unresolved: boolean;
+}
+
+/**
+ * What can `llm_model` actually name right now.
+ *
+ * Without this, picking a model means reading models.json by hand and guessing
+ * which entries have a usable credential — the file lists what was configured,
+ * not what works. pi's own catalog also contributes providers that never appear
+ * in that file, so the file alone cannot answer the question.
+ */
+export async function listModels(
+	cfg: ParaConfig,
+	options: { includeUnauthenticated?: boolean } = {},
+): Promise<ModelListing> {
+	const runtime = await ModelRuntime.create();
+	const available = await runtime.getAvailable();
+	const selected = resolveExecModel(cfg, available);
+	const availableKeys = new Set(available.map((m) => `${m.provider}\u0000${m.id}`));
+	const others = (runtime.getModels?.() ?? [])
+		.filter((m) => !availableKeys.has(`${m.provider}\u0000${m.id}`))
+		.map((m) => ({ provider: m.provider, id: m.id }));
+	const requested = cfg.llmModel.trim();
+	return {
+		available: available.map((m) => ({
+			provider: m.provider,
+			id: m.id,
+			selected: selected?.provider === m.provider && selected?.id === m.id,
+		})),
+		unauthenticatedCount: others.length,
+		...(options.includeUnauthenticated ? { unauthenticated: others } : {}),
+		requested,
+		unresolved: requested.length > 0 && selected === undefined,
+	};
+}
+
 export function listParaTools(disableKnowledge = false): string[] {
 	// Names only: this client is never dialed, so the device/port are irrelevant.
 	const client = new InspectorClient();
@@ -302,7 +349,7 @@ export async function runExec(cfg: ParaConfig, message: string): Promise<ExecRes
 			steps: [],
 			step_count: 0,
 			busy: false,
-			error: `llm_model "${cfg.llmModel.trim()}" matched no available model. Available: ${catalog}`,
+			error: `llm_model "${cfg.llmModel.trim()}" matched no available model. Run \`para models\` to list them. Available: ${catalog}`,
 		};
 	}
 

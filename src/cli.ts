@@ -12,7 +12,14 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAgentDir, applyConfigToEnv, loadConfig, syncInspectorEnv, type ParaConfig } from "./config.ts";
-import { execExitCode, EXTENSION_PATH, listParaTools, probeDoctor, runExec } from "./exec.ts";
+import {
+	execExitCode,
+	EXTENSION_PATH,
+	listModels,
+	listParaTools,
+	probeDoctor,
+	runExec,
+} from "./exec.ts";
 import { resolveIntoConfig } from "./ios-runtime/device-registry.ts";
 
 function piCliPath(): string {
@@ -27,6 +34,7 @@ Usage:
   para exec -m "<prompt>"    One turn; JSON on stdout
   para serve [--serve-host H] [--serve-port P]  Web UI, default 127.0.0.1:7777
   para doctor [--json]       Inspector + API-key probe
+  para models [--all]        Which models llm_model can name right now
   para tools                 List registered tool names
   para [chat] [pi-args...]   Interactive (pi TUI + this extension)
 
@@ -39,9 +47,10 @@ Config: ~/.para/config.toml, then env
                                          localhost forward
   PARA_INSPECTOR_HOST / PARA_INSPECTOR_PORT   Only used when transport=tcp
 
-LLM: ~/.para/agent/models.json (or \`pi auth\`). Pick a model with llm_model in
-  config.toml or --model. Separate from ~/.pi/agent; Para does not read
-  ANTHROPIC_* / OPENAI_*. Override home with PARA_AGENT_DIR.
+LLM: providers and keys live in ~/.para/agent/models.json (or \`pi auth\`); Para
+  only selects one, via llm_model in config.toml, PARA_LLM_MODEL, or --model.
+  Run \`para models\` to see what is usable right now. Separate from ~/.pi/agent;
+  Para does not read ANTHROPIC_* / OPENAI_*. Override home with PARA_AGENT_DIR.
 `);
 }
 
@@ -167,6 +176,47 @@ async function main(argv: string[]): Promise<number> {
 		const { cfg } = withCliOverrides(argv.slice(1));
 		for (const name of listParaTools(cfg.disableKnowledge)) process.stdout.write(`${name}\n`);
 		return 0;
+	}
+
+	if (head === "models") {
+		const json = hasFlag(argv, "--json");
+		const all = hasFlag(argv, "--all");
+		const { cfg } = withCliOverrides(argv.slice(1).filter((a) => a !== "--json" && a !== "--all"));
+		const listing = await listModels(cfg, { includeUnauthenticated: all });
+		if (json) {
+			process.stdout.write(`${JSON.stringify(listing, null, 2)}\n`);
+			return listing.unresolved ? 1 : 0;
+		}
+		if (listing.available.length === 0) {
+			process.stdout.write(
+				"No model has a usable credential.\nAdd a provider with an apiKey to ~/.para/agent/models.json, then re-run.\n",
+			);
+		} else {
+			process.stdout.write("Usable now (llm_model can name any of these):\n");
+			for (const m of listing.available) {
+				process.stdout.write(`  ${m.selected ? "*" : " "} ${m.provider}/${m.id}\n`);
+			}
+		}
+		if (listing.unresolved) {
+			process.stdout.write(`\nllm_model = "${listing.requested}" matches none of the above.\n`);
+		} else if (!listing.requested) {
+			process.stdout.write("\nllm_model is unset; pi picks the model.\n");
+		}
+		// pi ships a large builtin catalog, so this list is long and mostly
+		// irrelevant. Summarise unless asked for the whole thing.
+		if (listing.unauthenticatedCount > 0) {
+			if (all && listing.unauthenticated) {
+				process.stdout.write("\nKnown but not authenticated:\n");
+				for (const m of listing.unauthenticated) {
+					process.stdout.write(`    ${m.provider}/${m.id}\n`);
+				}
+			} else {
+				process.stdout.write(
+					`\n${listing.unauthenticatedCount} more model(s) known but lacking a credential — see --all.\n`,
+				);
+			}
+		}
+		return listing.unresolved ? 1 : 0;
 	}
 
 	if (head === "doctor") {

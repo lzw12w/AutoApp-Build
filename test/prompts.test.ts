@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildSystemPrompt, SYSTEM_PROMPT } from "../src/prompts.ts";
 import { listParaTools } from "../src/exec.ts";
+import { CODE_MODE_ENABLED } from "../src/mode.ts";
 import { h32, h64 } from "../src/knowledge/hash.ts";
 import { openSqlite } from "../src/knowledge/sqlite.ts";
 
@@ -8,13 +9,29 @@ describe("prompts", () => {
 	test("base prompt names tools that exist", () => {
 		const names = new Set(listParaTools());
 		expect(SYSTEM_PROMPT).toContain("You are Para.");
-		for (const tool of ["screen_digest", "view_hierarchy", "vc_hierarchy", "tap_with_diff", "wait_for", "todo_write", "navigate_to_page", "record_knowledge", "annotate_page", "switch_mode"]) {
+		for (const tool of ["screen_digest", "view_hierarchy", "vc_hierarchy", "tap_with_diff", "wait_for", "todo_write", "navigate_to_page", "record_knowledge", "annotate_page"]) {
 			expect(SYSTEM_PROMPT).toContain(tool);
 			expect(names.has(tool)).toBe(true);
 		}
 		expect(names.has("tap")).toBe(false);
 		expect(SYSTEM_PROMPT).not.toContain("vision_query");
 		expect(SYSTEM_PROMPT).not.toContain("skills_list");
+	});
+
+	// The prompt must never name a tool the extension does not register: the model
+	// would spend a turn calling it and get an unknown-tool error back.
+	test("switch_mode is named only when CODE mode is enabled", () => {
+		const names = new Set(listParaTools());
+		expect(SYSTEM_PROMPT.includes("switch_mode")).toBe(CODE_MODE_ENABLED);
+		expect(names.has("switch_mode")).toBe(CODE_MODE_ENABLED);
+	});
+
+	test("the GUI-only build tells the model it cannot change code", () => {
+		if (CODE_MODE_ENABLED) return;
+		expect(SYSTEM_PROMPT).toContain("You cannot change code.");
+		expect(SYSTEM_PROMPT).not.toContain("/code");
+		// Section numbering stays contiguous when 12 is swapped out.
+		expect(SYSTEM_PROMPT).toContain("13. **Reporting style.**");
 	});
 
 	test("appends project_knowledge when note body is set", () => {

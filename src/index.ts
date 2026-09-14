@@ -27,6 +27,9 @@ import { KnowledgeStore } from "./knowledge/store.ts";
 import {
 	activeToolsForMode,
 	buildCodeSystemPrompt,
+	CODE_MODE_ENABLED,
+	codeModeDisabledReason,
+	effectiveMode,
 	isModeContextMessage,
 	modeBlockReason,
 	modeContextLine,
@@ -101,53 +104,80 @@ export default function (pi: ExtensionAPI): void {
 	const noteBody = readNoteBody(notePath);
 	const todos = new TodoList();
 	const registered: string[] = [];
-	let mode: ParaMode = cfg.mode;
+	let mode: ParaMode = effectiveMode(cfg.mode);
 	let lastUi: ExtensionUIContext | undefined;
 
 	function applyMode(next: ParaMode, reason: string, ui?: ExtensionUIContext) {
 		const from = mode;
-		mode = next;
+		mode = effectiveMode(next);
 		const tools = activeToolsForMode(mode, registered);
 		pi.setActiveTools(tools);
 		const view = ui ?? lastUi;
 		view?.setStatus?.("para-mode", mode);
-		if (from !== next) view?.notify?.(`Para mode: ${from} → ${next}`, "info");
-		return { status: from === next ? ("unchanged" as const) : ("switched" as const), mode, from, reason, tools };
+		if (from !== mode) view?.notify?.(`Para mode: ${from} → ${mode}`, "info");
+		return { status: from === mode ? ("unchanged" as const) : ("switched" as const), mode, from, reason, tools };
 	}
 
-	pi.registerFlag("para-mode", {
-		description: "Start in gui (device) or code (repo) mode",
-		type: "string",
-		default: cfg.mode,
-	});
-	pi.registerCommand("gui", {
-		description: "Switch Para to GUI mode (drive the iOS app)",
-		handler: async (_args, ctx) => {
-			applyMode("gui", "user /gui", ctx.ui);
-		},
-	});
-	pi.registerCommand("code", {
-		description: "Switch Para to CODE mode (edit this workspace)",
-		handler: async (_args, ctx) => {
-			applyMode("code", "user /code", ctx.ui);
-		},
-	});
-	pi.registerCommand("mode", {
-		description: "Show or set Para mode: /mode, /mode gui, /mode code",
-		handler: async (args, ctx) => {
-			const raw = args.trim();
-			if (!raw) {
-				ctx.ui.notify(`Para mode: ${mode}`, "info");
-				return;
-			}
-			const parsed = parseMode(raw);
-			if (!parsed) {
-				ctx.ui.notify('Usage: /mode gui | /mode code', "error");
-				return;
-			}
-			applyMode(parsed, `user /mode ${parsed}`, ctx.ui);
-		},
-	});
+	// While CODE mode is off, none of its entry points exist: no --para-mode flag
+	// to set it, no /code or /mode command to reach it, and no switch_mode tool
+	// for the model to call. Registering them and then refusing would still leak
+	// the capability into the model's tool list and the /help output.
+	if (CODE_MODE_ENABLED) {
+		pi.registerFlag("para-mode", {
+			description: "Start in gui (device) or code (repo) mode",
+			type: "string",
+			default: cfg.mode,
+		});
+		pi.registerCommand("gui", {
+			description: "Switch Para to GUI mode (drive the iOS app)",
+			handler: async (_args, ctx) => {
+				applyMode("gui", "user /gui", ctx.ui);
+			},
+		});
+		pi.registerCommand("code", {
+			description: "Switch Para to CODE mode (edit this workspace)",
+			handler: async (_args, ctx) => {
+				applyMode("code", "user /code", ctx.ui);
+			},
+		});
+		pi.registerCommand("mode", {
+			description: "Show or set Para mode: /mode, /mode gui, /mode code",
+			handler: async (args, ctx) => {
+				const raw = args.trim();
+				if (!raw) {
+					ctx.ui.notify(`Para mode: ${mode}`, "info");
+					return;
+				}
+				const parsed = parseMode(raw);
+				if (!parsed) {
+					ctx.ui.notify('Usage: /mode gui | /mode code', "error");
+					return;
+				}
+				applyMode(parsed, `user /mode ${parsed}`, ctx.ui);
+			},
+		});
+	} else {
+		// Keep /mode as a read-only answer: users who know the old command get an
+		// explanation instead of "unknown command", and /gui stays a harmless no-op
+		// so muscle memory and existing scripts do not error.
+		pi.registerCommand("mode", {
+			description: "Show Para mode (GUI-only build)",
+			handler: async (args, ctx) => {
+				const parsed = parseMode(args.trim());
+				if (parsed === "code") {
+					ctx.ui.notify(codeModeDisabledReason() ?? "CODE mode is disabled.", "error");
+					return;
+				}
+				ctx.ui.notify("Para mode: gui (GUI-only build; no code mode)", "info");
+			},
+		});
+		pi.registerCommand("gui", {
+			description: "Switch Para to GUI mode (already the only mode)",
+			handler: async (_args, ctx) => {
+				applyMode("gui", "user /gui", ctx.ui);
+			},
+		});
+	}
 
 	let store: KnowledgeStore | null = null;
 	let observer: KnowledgeObserver | null = null;
@@ -178,7 +208,7 @@ export default function (pi: ExtensionAPI): void {
 		// Para's own agent home (~/.para/agent/models.json + auth.json). Para no
 		// longer injects a provider baseUrl, so it can't clobber a separate
 		// proxy's ANTHROPIC_*.
-		mode = parseModeOrDefault(pi.getFlag("para-mode"), cfg.mode);
+		mode = effectiveMode(parseModeOrDefault(pi.getFlag("para-mode"), cfg.mode));
 		lastUi = ctx.ui;
 		brandTui(ctx.ui);
 		applyMode(mode, "session start", ctx.ui);
@@ -198,7 +228,7 @@ export default function (pi: ExtensionAPI): void {
 			});
 			const device = cfg.inspectorDevice ? `device=${cfg.inspectorDevice}` : "no device selected";
 			const platform = cfg.inspectorPlatform !== "auto" ? ` ${cfg.inspectorPlatform}` : "";
-			ctx.ui.notify(`Para —${platform} ${device} (port ${cfg.inspectorRemotePort ?? cfg.inspectorPort}, mode: ${mode})`, "info");
+			ctx.ui.notify(`Para —${platform} ${device} (port ${cfg.inspectorRemotePort ?? cfg.inspectorPort}${CODE_MODE_ENABLED ? `, mode: ${mode}` : ""})`, "info");
 		} catch (e) {
 			ctx.ui.notify(`Para loaded — device setup skipped: ${e instanceof Error ? e.message : String(e)}`, "warning");
 		}
@@ -337,13 +367,15 @@ export default function (pi: ExtensionAPI): void {
 	registered.push("todo_write");
 	pi.registerTool(recordKnowledgeTool(notePath));
 	registered.push("record_knowledge");
-	pi.registerTool(
-		switchModeTool({
-			get: () => mode,
-			apply: (next, reason) => applyMode(next, reason),
-		}),
-	);
-	registered.push("switch_mode");
+	if (CODE_MODE_ENABLED) {
+		pi.registerTool(
+			switchModeTool({
+				get: () => mode,
+				apply: (next, reason) => applyMode(next, reason),
+			}),
+		);
+		registered.push("switch_mode");
+	}
 
 	if (!cfg.disableKnowledge) {
 		const kc: KnowledgeContext = {

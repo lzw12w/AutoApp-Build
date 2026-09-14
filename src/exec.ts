@@ -19,6 +19,7 @@ import { applyConfigToEnv, llmKeySet, syncInspectorEnv, type ParaConfig } from "
 import { InspectorError } from "./errors.ts";
 import { listDevices } from "./ios-runtime/device-broker.ts";
 import { resolveIntoConfig } from "./ios-runtime/device-registry.ts";
+import { CODE_MODE_ENABLED } from "./mode.ts";
 import { buildTools } from "./tools/index.ts";
 import { buildKnowledgeTools } from "./tools/knowledge.ts";
 import { recordKnowledgeTool } from "./tools/note.ts";
@@ -181,7 +182,7 @@ export function listParaTools(disableKnowledge = false): string[] {
 	const names = buildTools(client).map((t) => t.name);
 	names.push(todoWriteTool(new TodoList()).name);
 	names.push(recordKnowledgeTool("/dev/null").name);
-	names.push("switch_mode");
+	if (CODE_MODE_ENABLED) names.push("switch_mode");
 	if (disableKnowledge) return names;
 	const knowledge = buildKnowledgeTools({
 		client,

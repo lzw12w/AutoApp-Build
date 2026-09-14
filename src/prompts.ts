@@ -9,12 +9,15 @@
  *     (no address_state / text_value / skipped);
  *   - pixels come from `screenshot`, not a vision_query sub-model;
  *   - screen_digest surfaces stable `aid=` ids (hex is the fallback).
- * The GUI/CODE mode section is Para-specific and has no Python counterpart.
+ * Section 12 varies by build: the GUI/CODE mode switch when CODE mode is on, a
+ * flat "you cannot change code" statement when it is off. Neither has a Python
+ * counterpart.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { formatSkillsForPrompt, type Skill } from "@earendil-works/pi-coding-agent";
+import { CODE_MODE_ENABLED } from "./mode.ts";
 
-export const SYSTEM_PROMPT = `You are Para.
+const SYSTEM_PROMPT_HEAD = `You are Para.
 
 You operate a running iOS or Android app through a set of tools that wrap the
 app's Inspector HTTP server. Your job is to satisfy the user's request by
@@ -186,7 +189,16 @@ Operating principles:
       the moment it is fully done (don't batch); leave it \`in_progress\` if it
       is blocked or only partially done.
     - Skip it for a single trivial step — the overhead isn't worth it.
+`;
 
+/**
+ * Section 12 in the CODE-enabled build: how to move between GUI and CODE.
+ *
+ * Kept out of the head so the GUI-only build never mentions switch_mode —
+ * naming an unregistered tool just produces failed calls. Swapped back in
+ * automatically when CODE_MODE_ENABLED flips on.
+ */
+const MODES_SECTION = `
 12. **Modes.** You are in GUI mode (device). Coding tools (write / edit / bash /
     grep / find / ls) are off.
     - When the task requires changing source files, tests, or running shell in
@@ -195,7 +207,21 @@ Operating principles:
     - After code work, switch back to \`gui\` to verify on the device.
     - Do not bounce every turn. Switch to code only when you must write/edit/bash.
     - \`switch_mode\` takes effect on your next tool batch.
+`;
 
+/** The GUI-only build states the limit instead, so the model stops asking. */
+const GUI_ONLY_SECTION = `
+12. **You cannot change code.** Para is GUI-only: there are no write / edit /
+    bash / grep / find / ls tools, and no mode to switch into. \`read\` is
+    available for looking at a file when it helps you understand the app.
+    - When the fix belongs in source, do not attempt it and do not ask to switch
+      modes. Finish the device-side investigation and report precisely: the
+      symptom, the steps that reproduce it, and — when you can see it — the view
+      or controller involved.
+    - Never claim you edited, patched, or fixed anything.
+`;
+
+const REPORTING_SECTION = `
 13. **Reporting style.** When done, summarize:
     - what you observed (controller chain, key views, frames)
     - what you did (tools used, in order)
@@ -203,6 +229,9 @@ Operating principles:
 
 Be concise. Prefer compact JSON-like reports over prose narration.
 `;
+
+export const SYSTEM_PROMPT =
+	SYSTEM_PROMPT_HEAD + (CODE_MODE_ENABLED ? MODES_SECTION : GUI_ONLY_SECTION) + REPORTING_SECTION;
 
 export function readNoteBody(path: string | undefined): string {
 	if (!path) return "";

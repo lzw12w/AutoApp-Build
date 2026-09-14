@@ -176,8 +176,21 @@ para call swipe --json '{"start_x":100,"start_y":600,"end_x":100,"end_y":200}'
 图谱，和经过 agent 时一致；否则用 `call` 驱动一整轮之后，`navigate_to_page`
 会规划不出它没学到的路径。
 
-`switch_mode` 和 `todo_write` 不在 `call` 里：它们改的是一次会话往后的状态，
-而 `call` 跑完就退出。两个都仍可通过 `para exec` 使用。
+`todo_write` 不在 `call` 里：它改的是一次会话往后的状态，而 `call` 跑完就退出。
+它仍可通过 `para exec` 使用。
+
+## 只有 GUI，没有 code 模式
+
+Para 只驱动设备，不改代码：没有 `write` / `edit` / `bash` / `grep` / `find` /
+`ls`，也没有切过去的开关。`read` 保留，用于对着源码理解 App。
+
+历史上有个 CODE 模式（`switch_mode` 工具、`/code`、`--para-mode`）。它现在由
+`src/mode.ts` 里的 `CODE_MODE_ENABLED = false` 关掉：工具不注册、命令不挂、
+`config.toml` 的 `mode = "code"` 和 `PARA_MODE=code` 都被夹回 `gui`。代码和测试
+都还在，把那个常量改成 `true` 就整套回来。
+
+需要改源码时，Para 会把现象、复现步骤和涉及的 view / controller 报给你，由你
+或另一个 coding agent 去改。
 
 常用参数：`--host` `--port` `--device` / `-d` `--platform` `--remote-port`。
 

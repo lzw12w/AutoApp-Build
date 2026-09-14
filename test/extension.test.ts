@@ -6,17 +6,26 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../src/index.ts";
-import { CODE_BUILTIN_TOOLS } from "../src/mode.ts";
+import { CODE_BUILTIN_TOOLS, CODE_MODE_ENABLED } from "../src/mode.ts";
 
 type CommandHandler = (args: string, ctx: { ui: { notify: (msg: string, level?: string) => void; setStatus?: (key: string, text: string | undefined) => void } }) => Promise<void>;
 
 function loadExtension(flag?: string) {
+	delete process.env.PARA_MODE;
+	delete process.env.INSPECTOR_MODE;
+	return loadExtensionKeepingEnv(flag);
+}
+
+/**
+ * Same harness, but leaves PARA_MODE / INSPECTOR_MODE alone so a test can prove
+ * the env path is clamped too. loadExtension() clears them first, which would
+ * hide exactly that.
+ */
+function loadExtensionKeepingEnv(flag?: string) {
 	const tools = new Map<string, unknown>();
 	const events = new Map<string, unknown>();
 	const commands = new Map<string, CommandHandler>();
 	let active: string[] | undefined;
-	delete process.env.PARA_MODE;
-	delete process.env.INSPECTOR_MODE;
 
 	const pi = {
 		on: (event: string, handler: unknown) => {
@@ -57,9 +66,9 @@ describe("extension entry", () => {
 		expect(tools.has("todo_write")).toBe(true);
 		expect(tools.has("record_knowledge")).toBe(true);
 		expect(tools.has("annotate_page")).toBe(true);
-		expect(tools.has("switch_mode")).toBe(true);
+		expect(tools.has("switch_mode")).toBe(CODE_MODE_ENABLED);
 		expect(commands.has("gui")).toBe(true);
-		expect(commands.has("code")).toBe(true);
+		expect(commands.has("code")).toBe(CODE_MODE_ENABLED);
 		expect(commands.has("mode")).toBe(true);
 		expect(events.has("session_start")).toBe(true);
 		expect(events.has("session_info_changed")).toBe(true);
@@ -104,7 +113,7 @@ describe("extension entry", () => {
 		expect(active?.includes("read")).toBe(true);
 		expect(active?.includes("bash")).toBe(false);
 		expect(active?.includes("write")).toBe(false);
-		expect(active?.includes("switch_mode")).toBe(true);
+		expect(active?.includes("switch_mode")).toBe(CODE_MODE_ENABLED);
 
 		const before = events.get("before_agent_start") as (
 			event?: { systemPrompt?: string; systemPromptOptions?: { skills: Array<{ name: string; description: string; filePath: string; disableModelInvocation: boolean }> } },
@@ -116,7 +125,7 @@ describe("extension entry", () => {
 		expect(systemPrompt).toContain("wait_for");
 		expect(systemPrompt).toContain("todo_write");
 		expect(systemPrompt).toContain("record_knowledge");
-		expect(systemPrompt).toContain("switch_mode");
+		expect(systemPrompt.includes("switch_mode")).toBe(CODE_MODE_ENABLED);
 		expect(systemPrompt).not.toContain("vision_query");
 
 		const withSkills = await before({
@@ -148,6 +157,7 @@ describe("extension entry", () => {
 	});
 
 	test("/code enables coding builtins and drops device tools; /gui restores", async () => {
+		if (!CODE_MODE_ENABLED) return;
 		const { tools, events, commands, getActive } = loadExtension();
 		const start = events.get("session_start") as (event: unknown, ctx: { ui: typeof ui }) => Promise<void>;
 		await start({}, { ui });
@@ -187,6 +197,7 @@ describe("extension entry", () => {
 	});
 
 	test("switch_mode tool and --para-mode code start in CODE", async () => {
+		if (!CODE_MODE_ENABLED) return;
 		const { tools, events, getActive } = loadExtension("code");
 		const start = events.get("session_start") as (event: unknown, ctx: { ui: typeof ui }) => Promise<void>;
 		await start({}, { ui });
@@ -219,7 +230,7 @@ describe("extension entry", () => {
 		const toolCall = events.get("tool_call") as (event: { toolName: string; input?: Record<string, unknown> }) => Promise<{ block?: boolean; reason?: string } | void>;
 		const blocked = await toolCall({ toolName: "bash" });
 		expect(blocked?.block).toBe(true);
-		expect(blocked?.reason).toMatch(/GUI mode/);
+		expect(blocked?.reason).toMatch(CODE_MODE_ENABLED ? /GUI mode/ : /GUI-only/);
 		expect(await toolCall({ toolName: "screen_digest" })).toBeUndefined();
 
 		const context = events.get("context") as (event: {
@@ -234,5 +245,67 @@ describe("extension entry", () => {
 		const second = await context({ messages: first.messages });
 		const modeLines = second.messages.filter((m) => JSON.stringify(m).includes("<para-mode>"));
 		expect(modeLines).toHaveLength(1);
+	});
+
+	// The point of the kill switch: every entrance into CODE mode is closed, so
+	// no single leak re-opens it. Each expectation below is a separate entrance.
+	test("CODE mode is unreachable while the kill switch is off", async () => {
+		if (CODE_MODE_ENABLED) return;
+
+		// --para-mode code is the flag path; PARA_MODE=code is the env path.
+		process.env.PARA_MODE = "code";
+		const { tools, events, commands, getActive } = loadExtensionKeepingEnv("code");
+		const start = events.get("session_start") as (event: unknown, ctx: { ui: typeof ui }) => Promise<void>;
+		await start({}, { ui });
+		delete process.env.PARA_MODE;
+
+		const active = getActive() ?? [];
+		expect(active.includes("tap_with_diff")).toBe(true);
+		expect(active.includes("bash")).toBe(false);
+		expect(active.includes("write")).toBe(false);
+		expect(active.includes("edit")).toBe(false);
+
+		// The model never sees the tool, so it cannot ask for the mode.
+		expect(tools.has("switch_mode")).toBe(false);
+		expect(commands.has("code")).toBe(false);
+
+		// /mode code explains itself instead of switching.
+		const notices: string[] = [];
+		await commands.get("mode")!("code", {
+			ui: { notify: (msg: string) => notices.push(msg), setStatus: () => {} },
+		});
+		expect(notices.join(" ")).toMatch(/GUI-only/);
+		expect((getActive() ?? []).includes("bash")).toBe(false);
+
+		// A coding tool is refused without pointing at a tool that isn't there.
+		const toolCall = events.get("tool_call") as (event: { toolName: string }) => Promise<{ block?: boolean; reason?: string } | void>;
+		const blocked = await toolCall({ toolName: "bash" });
+		expect(blocked?.block).toBe(true);
+		expect(blocked?.reason).toMatch(/GUI-only/);
+		expect(blocked?.reason).not.toContain("switch_mode");
+
+		// GUI stays fully functional: the prompt is Para's, not pi's coding one.
+		const before = events.get("before_agent_start") as (
+			event?: { systemPrompt?: string },
+		) => Promise<{ systemPrompt: string }>;
+		const { systemPrompt } = await before({ systemPrompt: "You are a coding agent." });
+		expect(systemPrompt).toContain("You are Para.");
+		expect(systemPrompt).not.toContain("<para_mode>");
+		expect(systemPrompt).not.toContain("switch_mode");
+
+		// The per-request mode line must not advertise the switch either.
+		const context = events.get("context") as (event: {
+			messages: Array<{ role: string; content: unknown; timestamp?: number }>;
+		}) => Promise<{ messages: Array<{ role: string; content: unknown }> }>;
+		const ctxResult = await context({
+			messages: [{ role: "user", content: [{ type: "text", text: "fix the crash" }], timestamp: 1 }],
+		});
+		const lastLine = JSON.stringify(ctxResult.messages[ctxResult.messages.length - 1]);
+		expect(lastLine).toContain("<para-mode>gui</para-mode>");
+		expect(lastLine).not.toContain("switch_mode");
+
+		// Compaction still runs (it is skipped only in CODE mode).
+		const compact = events.get("session_before_compact");
+		expect(compact).toBeDefined();
 	});
 });

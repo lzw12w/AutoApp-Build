@@ -5,12 +5,43 @@
  * keeping both loaded is not. Humans use /gui /code /mode; the model uses
  * switch_mode. Tool whitelist + prompt + a request-local mode line all move
  * together. setActiveTools takes effect on the next LLM call in the turn.
+ *
+ * CODE mode is currently SHUT OFF behind `CODE_MODE_ENABLED` — see that
+ * constant. The machinery below is kept intact and tested so re-enabling is a
+ * one-line flip rather than an archaeology exercise.
  */
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { errResult, okResult } from "./tools/result.ts";
 
 export type ParaMode = "gui" | "code";
+
+/**
+ * The single kill switch for CODE mode. While false:
+ *   - `switch_mode` is not registered, so the model never sees it;
+ *   - /code is not registered and /mode code is refused;
+ *   - the --para-mode flag is not registered;
+ *   - config.toml `mode = "code"` and PARA_MODE=code are clamped to gui;
+ *   - the system prompt tells the model there is no code mode at all.
+ * Flip to true to restore every one of those in one step.
+ */
+export const CODE_MODE_ENABLED = false;
+
+/**
+ * Clamp a requested mode to what this build actually allows.
+ *
+ * Every path that can name a mode (config, env, flag, slash command, the
+ * switch_mode tool) funnels through here, so the switch cannot be defeated by
+ * picking a different entrance.
+ */
+export function effectiveMode(requested: ParaMode): ParaMode {
+	return CODE_MODE_ENABLED ? requested : "gui";
+}
+
+/** Why a code-mode request was refused, or null when it is allowed. */
+export function codeModeDisabledReason(): string | null {
+	return CODE_MODE_ENABLED ? null : "CODE mode is disabled in this build. Para is GUI-only: it drives the device and cannot edit files or run shell.";
+}
 
 /** pi coding-agent builtins exposed in CODE mode. No powershell (we are on Unix). */
 export const CODE_BUILTIN_TOOLS: readonly string[] = [
@@ -61,6 +92,12 @@ export function isGuiOnlyTool(name: string, paraTools: ReadonlySet<string>): boo
 
 export function modeBlockReason(mode: ParaMode, toolName: string, paraTools: ReadonlySet<string>): string | null {
 	if (mode === "gui" && isCodeOnlyTool(toolName)) {
+		// With CODE mode off there is nothing to point the model at: naming
+		// switch_mode here would advertise a tool that is not registered, and it
+		// would burn a turn calling it. State the hard limit instead.
+		if (!CODE_MODE_ENABLED) {
+			return `"${toolName}" is not available. Para is GUI-only: it drives the device and cannot edit files or run shell. Report what needs changing instead of trying to change it.`;
+		}
 		return `GUI mode: "${toolName}" is a coding tool. Call switch_mode(mode="code") or /code first.`;
 	}
 	if (mode === "code" && isGuiOnlyTool(toolName, paraTools)) {
@@ -72,6 +109,15 @@ export function modeBlockReason(mode: ParaMode, toolName: string, paraTools: Rea
 /** Cheap per-request line so a mid-turn switch is visible on the next LLM call. */
 export function modeContextLine(mode: ParaMode): string {
 	if (mode === "gui") {
+		// Do not mention switch_mode while CODE mode is off — the tool is not
+		// registered, so pointing at it just produces failed calls.
+		if (!CODE_MODE_ENABLED) {
+			return (
+				"<para-mode>gui</para-mode> Device tools are active. Para is GUI-only in this build: " +
+				"there are no write/edit/bash tools and no way to switch to one. " +
+				"If the task needs a source change, say what to change and why — do not attempt it."
+			);
+		}
 		return (
 			'<para-mode>gui</para-mode> Device tools are active. Coding write/edit/bash are off. ' +
 			'Call switch_mode(mode="code") only when you must change source files.'
@@ -147,6 +193,14 @@ export function switchModeTool(switcher: ModeSwitcher) {
 		}),
 		execute: async (_id, params) => {
 			try {
+				// Defence in depth: index.ts does not register this tool while CODE
+				// mode is off, so the model cannot reach it. If some other caller
+				// does, refuse rather than half-switch into a mode whose tools were
+				// never activated.
+				const disabled = codeModeDisabledReason();
+				if (disabled && params.mode === "code") {
+					return errResult<Details>(new Error(disabled));
+				}
 				const reason = (params.reason ?? "").trim() || "agent switch_mode";
 				return okResult<Details>(switcher.apply(params.mode, reason));
 			} catch (e) {

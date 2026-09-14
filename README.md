@@ -149,7 +149,6 @@ para exec -m "<prompt>" [--continue | --session-id <id>]   一轮，JSON stdout
 para call --list             可直接调用的工具及参数
 para call <tool> --help      单个工具的参数说明
 para call <tool> [...]       直接调一个工具，不经过模型
-para serve [--serve-host H] [--serve-port P]   Web UI，默认 127.0.0.1:7777
 para doctor [--json]         Inspector + 密钥 + 已连设备 + 已连设备
 para tools                   已注册工具名
 para [chat] [pi-args...]     交互（pi TUI + 本仓库 extension）

@@ -15,7 +15,6 @@ function loadExtension(flag?: string) {
 	const events = new Map<string, unknown>();
 	const commands = new Map<string, CommandHandler>();
 	let active: string[] | undefined;
-	process.env.PARA_AUTO_TUNNEL = "0";
 	delete process.env.PARA_MODE;
 	delete process.env.INSPECTOR_MODE;
 

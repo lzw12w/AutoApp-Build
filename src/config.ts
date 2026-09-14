@@ -54,7 +54,6 @@ export interface ParaConfig {
 	inspectorRemotePort?: number;
 	bundleId: string;
 	knowledgeDir?: string;
-	autoTunnel: boolean;
 	disableKnowledge: boolean;
 	/**
 	 * Provider id selecting which pi provider to use (Para's ~/.para/agent/models.json
@@ -81,7 +80,6 @@ const DEFAULTS: ParaConfig = {
 	inspectorTimeoutMs: 5000,
 	inspectorPlatform: "auto",
 	bundleId: "",
-	autoTunnel: true,
 	disableKnowledge: false,
 	llmProvider: "anthropic",
 	llmModel: "",
@@ -92,10 +90,6 @@ const DEFAULTS: ParaConfig = {
 
 function truthy(raw: string | undefined): boolean {
 	return ["1", "true", "yes", "on"].includes((raw ?? "").trim().toLowerCase());
-}
-
-function falsy(raw: string | undefined): boolean {
-	return ["0", "false", "no", "off"].includes((raw ?? "").trim().toLowerCase());
 }
 
 /** Strip a `#` comment, but not one inside a single/double-quoted string. */
@@ -208,9 +202,6 @@ export function loadConfig(options: { tomlPath?: string; env?: NodeJS.ProcessEnv
 	if (remotePort) cfg.inspectorRemotePort = Number(remotePort) || cfg.inspectorRemotePort;
 	cfg.bundleId = env.PARA_BUNDLE_ID || env.INSPECTOR_BUNDLE_ID || cfg.bundleId;
 	if (env.PARA_KNOWLEDGE_DIR) cfg.knowledgeDir = env.PARA_KNOWLEDGE_DIR;
-	if (env.PARA_AUTO_TUNNEL !== undefined) {
-		cfg.autoTunnel = !falsy(env.PARA_AUTO_TUNNEL);
-	}
 	if (truthy(env.PARA_DISABLE_KNOWLEDGE) || truthy(env.INSPECTOR_DISABLE_KNOWLEDGE)) {
 		cfg.disableKnowledge = true;
 	}
@@ -249,7 +240,6 @@ export function applyConfigToEnv(cfg: ParaConfig, env: NodeJS.ProcessEnv = proce
 	if (cfg.inspectorRemotePort) setIfAbsent("PARA_INSPECTOR_REMOTE_PORT", String(cfg.inspectorRemotePort));
 	if (cfg.bundleId) setIfAbsent("PARA_BUNDLE_ID", cfg.bundleId);
 	if (cfg.knowledgeDir) setIfAbsent("PARA_KNOWLEDGE_DIR", cfg.knowledgeDir);
-	if (!cfg.autoTunnel) env.PARA_AUTO_TUNNEL = "0";
 }
 
 /** After device routing, overwrite inspector bind so a child `pi -e` sees the assigned port. */

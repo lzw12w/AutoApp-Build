@@ -9,6 +9,20 @@
  *    chain, role-aids). Distinguishes pages sharing a skeleton.
  *  - **Visual**: optional tie-breaker computed elsewhere (screenshot pipeline).
  *
+ * STATUS — the visual layer is NOT wired up. The plumbing exists end to end
+ * (`computeFingerprint({ visualHash })` → `KnowledgeObserver.observe` → the
+ * `fingerprints.visual_hash` column), but no caller supplies a value, so it is
+ * always null in practice and nothing consumes it: `graph.ts` never reads
+ * `visualHash`. Treat the three layers as "two computed, one reserved".
+ *
+ * Related: `PageMatcher` (graph.ts) currently decides page identity by visible
+ * VC class alone, so `skeletonHash` / `semanticHash` are persisted and
+ * explanatory but do not drive matching either. `hammingDistance` below has no
+ * production caller for the same reason — it is kept for the tests and for
+ * whoever re-enables distance-based matching. Wiring the visual layer means
+ * feeding a screenshot-derived hash in AND giving the matcher a reason to read
+ * it; doing only the first changes nothing.
+ *
  * Each layer is a 64-bit hex string; hamming distance is a cheap XOR+popcount.
  *
  * HASH NOTE: Python used stdlib `blake2b(digest_size=8)`. We use node:crypto

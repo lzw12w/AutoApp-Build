@@ -3,7 +3,6 @@
  * `para` CLI.
  *
  *   para exec -m "..."   one machine-stable turn (JSON on stdout)
- *   para serve           Web UI + agent/graph API
  *   para doctor [--json] inspector + LLM-key probe
  *   para tools           list registered tool names
  *   para [chat] [...]    interactive (pi CLI + this extension)
@@ -48,7 +47,6 @@ function printHelp(): void {
 
 Usage:
   para exec -m "<prompt>" [--session-id <id> | -c]   One turn; JSON on stdout
-  para serve [--serve-host H] [--serve-port P]  Web UI, default 127.0.0.1:7777
   para doctor [--json]       Inspector + API-key probe
   para models [--all]        Which models llm_model can name right now
   para tools                 List registered tool names
